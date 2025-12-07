@@ -2,4 +2,7 @@ streamlit
 pm4py
 graphviz
 openai
-
+mediapipe
+opencv-python
+moviepy
+pandas
