@@ -95,6 +95,10 @@ class VideoProcessor:
             return events
 
         fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            print("Warning: FPS is 0 or invalid, defaulting to 30 FPS")
+            fps = 30.0
+            
         frame_count = 0
         
         while cap.isOpened():
