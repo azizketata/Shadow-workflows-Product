@@ -3,7 +3,7 @@ import tempfile
 import cv2
 import mediapipe as mp
 import pandas as pd
-from moviepy.editor import VideoFileClip
+from moviepy import VideoFileClip
 from openai import OpenAI
 import time
 
