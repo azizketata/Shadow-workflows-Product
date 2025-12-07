@@ -6,3 +6,4 @@ mediapipe
 opencv-python
 moviepy
 pandas
+sentence-transformers

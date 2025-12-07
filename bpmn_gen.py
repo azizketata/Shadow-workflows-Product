@@ -17,10 +17,10 @@ def generate_agenda_bpmn(agenda_text, api_key):
         api_key (str): OpenAI API key.
         
     Returns:
-        graphviz.Digraph: The visual representation of the BPMN model.
+        tuple: (graphviz.Digraph, list of activities, BPMN object)
     """
     if not agenda_text or not api_key:
-        return None
+        return None, [], None
 
     try:
         client = openai.OpenAI(api_key=api_key)
@@ -91,7 +91,7 @@ def generate_agenda_bpmn(agenda_text, api_key):
         # but typically Graphviz defaults are okay or we can modify the body.
         gviz.attr(rankdir='TB') 
         
-        return gviz
+        return gviz, activities, bpmn_graph
 
     except Exception as e:
         print(f"Error generating BPMN: {e}")
@@ -99,7 +99,7 @@ def generate_agenda_bpmn(agenda_text, api_key):
         import graphviz
         err_g = graphviz.Digraph()
         err_g.node('Error', f"Error generating BPMN: {str(e)}")
-        return err_g
+        return err_g, [], None
 
 def convert_to_event_log(df):
     """

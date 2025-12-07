@@ -5,6 +5,7 @@ import pandas as pd
 import time
 from bpmn_gen import generate_agenda_bpmn, convert_to_event_log, generate_discovered_bpmn
 from video_processor import VideoProcessor
+from compliance_engine import ComplianceEngine
 
 # Page Config
 st.set_page_config(page_title="Meeting Process Twin", layout="wide")
@@ -15,10 +16,27 @@ api_key = st.sidebar.text_input("OpenAI API Key", type="password")
 uploaded_video = st.sidebar.file_uploader("Meeting Video", type=["mp4"])
 agenda_text = st.sidebar.text_area("Meeting Agenda", height=200, help="Paste your meeting agenda here.")
 
+# Initialize Compliance Engine
+@st.cache_resource
+def load_compliance_engine():
+    return ComplianceEngine()
+
+compliance_engine = load_compliance_engine()
+
 # Main Area
 st.title("Meeting Process Twin")
 
+# Metric Container at the top
+metric_container = st.empty()
+
 col1, col2 = st.columns(2)
+
+# Global variables to store reference data for comparison
+# Using session state to persist between reruns
+if 'agenda_activities' not in st.session_state:
+    st.session_state['agenda_activities'] = []
+if 'reference_bpmn' not in st.session_state:
+    st.session_state['reference_bpmn'] = None
 
 # Left Column: Reference Model
 with col1:
@@ -28,11 +46,21 @@ with col1:
         if not api_key:
             st.warning("Please enter your OpenAI API Key in the sidebar.")
         else:
+            # Check if we need to regenerate (if agenda changed or not generated yet)
+            # For simplicity, we regenerate if button clicked or just run
+            # Ideally we check if agenda_text changed.
+            
             with st.spinner("Generating BPMN from Agenda..."):
                 try:
-                    bpmn_graph = generate_agenda_bpmn(agenda_text, api_key)
-                    if bpmn_graph:
-                        st.graphviz_chart(bpmn_graph, use_container_width=True)
+                    # Logic to avoid re-generating on every rerun if text hasn't changed could be added here
+                    # For now, we rely on the function call
+                    bpmn_viz, activities, bpmn_obj = generate_agenda_bpmn(agenda_text, api_key)
+                    
+                    if bpmn_viz:
+                        st.graphviz_chart(bpmn_viz, use_container_width=True)
+                        # Store for compliance checking
+                        st.session_state['agenda_activities'] = activities
+                        st.session_state['reference_bpmn'] = bpmn_obj
                     else:
                         st.error("Failed to generate BPMN graph.")
                 except Exception as e:
@@ -76,7 +104,7 @@ with col2:
                         if 'video_path' in locals() and os.path.exists(video_path):
                             os.unlink(video_path)
             
-            # --- PHASE 3: SIMULATION ---
+            # --- PHASE 3 & 4: SIMULATION & COMPLIANCE ---
             if 'video_events' in st.session_state:
                 df_events = st.session_state['video_events']
                 
@@ -90,18 +118,14 @@ with col2:
                 status_container = st.empty()
                 bpmn_container = st.empty()
                 
-                # Initial View (All events if not simulating, or empty)
+                # Initial View
                 if 'simulation_active' not in st.session_state:
                      st.write("Click 'Start Analysis' to simulate real-time discovery.")
                      st.dataframe(df_events, use_container_width=True, height=200)
 
                 # Simulation Loop
                 if st.session_state.get('simulation_active'):
-                    # Determine duration (convert last timestamp to seconds)
-                    # For simplicity, we'll iterate through the event list directly or time steps
-                    # Time-step approach is better for "Real-time" feel
                     
-                    # Convert timestamps to seconds for easier comparison
                     def time_str_to_seconds(t_str):
                         m, s = map(int, t_str.split(':'))
                         return m * 60 + s
@@ -110,14 +134,9 @@ with col2:
                     if not df_events.empty:
                         max_seconds = time_str_to_seconds(df_events.iloc[-1]['timestamp'])
                     
-                    # Simulation settings
-                    speed_multiplier = 2  # Run 2x faster than real-time
-                    step_size = 5 # Update every 5 seconds of video time
-                    
-                    # Loop
+                    speed_multiplier = 2 
+                    step_size = 5
                     current_video_time = 0
-                    
-                    # Progress bar
                     progress_bar = st.progress(0)
                     
                     while current_video_time <= max_seconds + step_size:
@@ -125,16 +144,60 @@ with col2:
                         mins, secs = divmod(current_video_time, 60)
                         time_display = f"{int(mins):02d}:{int(secs):02d}"
                         
-                        # 2. Filter Events up to current time
-                        # We need to filter based on string comparison or pre-calculated seconds
-                        # Let's do a quick lambda for this filter
+                        # 2. Filter Events
                         current_events = df_events[
                             df_events['timestamp'].apply(time_str_to_seconds) <= current_video_time
                         ]
                         
+                        # --- PHASE 4: COMPLIANCE CHECK ---
+                        fitness_score = 0.0
+                        mapped_events = current_events
+                        
+                        if not current_events.empty and st.session_state['reference_bpmn'] and st.session_state['agenda_activities']:
+                            # Map events
+                            mapped_events = compliance_engine.map_events_to_agenda(
+                                current_events, 
+                                st.session_state['agenda_activities']
+                            )
+                            
+                            # Convert to log for fitness calculation
+                            log_data_for_fitness = convert_to_event_log(mapped_events)
+                            
+                            # Calculate Fitness
+                            if log_data_for_fitness is not None:
+                                fitness_score = compliance_engine.calculate_fitness(
+                                    st.session_state['reference_bpmn'], 
+                                    log_data_for_fitness
+                                )
+                        
+                        # Update Metric Card
+                        fitness_percent = fitness_score * 100
+                        delta_color = "normal"
+                        warning_msg = ""
+                        
+                        if fitness_percent < 50 and not current_events.empty:
+                            delta_color = "inverse"
+                            warning_msg = "⚠️ Meeting deviating from Agenda!"
+                            
+                        metric_container.metric(
+                            label="Process Fitness Score (Behavioral Alignment)",
+                            value=f"{fitness_percent:.1f}%",
+                            delta=f"{fitness_percent-100:.1f}%" if fitness_percent < 100 else "Perfect",
+                            delta_color=delta_color
+                        )
+                        if warning_msg:
+                            st.warning(warning_msg)
+
+                        # Update Status Display
                         last_action = "Waiting..."
-                        if not current_events.empty:
-                            last_action = f"{current_events.iloc[-1]['activity_name']} ({current_events.iloc[-1]['source']})"
+                        if not mapped_events.empty:
+                            last_row = mapped_events.iloc[-1]
+                            act_name = last_row.get('mapped_activity', last_row['activity_name'])
+                            original = last_row['activity_name']
+                            source = last_row['source']
+                            last_action = f"{act_name} (Source: {source})"
+                            if 'mapped_activity' in last_row and last_row['mapped_activity'] != last_row['activity_name']:
+                                last_action += f" [Mapped from: {original}]"
                         
                         status_container.markdown(
                             f"""
@@ -147,10 +210,9 @@ with col2:
                             unsafe_allow_html=True
                         )
                         
-                        # 3. Discover & Update BPMN (Incremental)
-                        if not current_events.empty:
-                            # We need at least a few events to form a graph
-                            log_data = convert_to_event_log(current_events)
+                        # 3. Discover & Update BPMN
+                        if not mapped_events.empty:
+                            log_data = convert_to_event_log(mapped_events)
                             if log_data is not None:
                                 graph = generate_discovered_bpmn(log_data)
                                 if graph:
@@ -165,16 +227,12 @@ with col2:
                             progress = min(current_video_time / max_seconds, 1.0)
                             progress_bar.progress(progress)
 
-                        # Sleep
-                        time.sleep(1 / speed_multiplier) # Sleep less for faster playback
-                        
-                        # Increment
+                        time.sleep(1 / speed_multiplier)
                         current_video_time += step_size
                     
                     st.success("Simulation Complete")
-                    st.session_state['simulation_active'] = False # Reset
+                    st.session_state['simulation_active'] = False
                 
-                # Option to clear
                 if st.button("Clear Data & Reset"):
                     del st.session_state['video_events']
                     if 'simulation_active' in st.session_state:
@@ -182,7 +240,6 @@ with col2:
                     st.rerun()
 
     else:
-        # Placeholder for Video Player (Visual Only)
         st.markdown(
             """
             <div style="border: 2px dashed #ccc; padding: 20px; text-align: center; height: 300px; display: flex; align-items: center; justify-content: center; border-radius: 10px; margin-bottom: 20px;">

@@ -32,9 +32,12 @@ class VideoProcessor:
             fd, audio_path = tempfile.mkstemp(suffix=".mp3")
             os.close(fd)
             
-            # Write audio to the temp file
-            video.audio.write_audiofile(audio_path, verbose=False, logger=None)
-            video.close()
+            try:
+                # Write audio to the temp file
+                video.audio.write_audiofile(audio_path, verbose=False, logger=None)
+            finally:
+                video.close()
+                
             return audio_path
         except Exception as e:
             print(f"Error extracting audio: {e}")
