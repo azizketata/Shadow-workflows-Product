@@ -3,7 +3,7 @@ import tempfile
 import os
 import pandas as pd
 import time
-from bpmn_gen import generate_agenda_bpmn, convert_to_event_log, generate_discovered_bpmn
+from bpmn_gen import generate_agenda_bpmn, convert_to_event_log, generate_discovered_bpmn, generate_colored_bpmn
 from video_processor import VideoProcessor
 from compliance_engine import ComplianceEngine
 
@@ -15,6 +15,15 @@ st.sidebar.title("Configuration")
 api_key = st.sidebar.text_input("OpenAI API Key", type="password")
 uploaded_video = st.sidebar.file_uploader("Meeting Video", type=["mp4"])
 agenda_text = st.sidebar.text_area("Meeting Agenda", height=200, help="Paste your meeting agenda here.")
+
+# Governance: Detected Deviations
+st.sidebar.markdown("---")
+st.sidebar.subheader("Governance: Detected Deviations")
+
+if 'deviations' not in st.session_state:
+    st.session_state['deviations'] = set()
+if 'accepted_deviations' not in st.session_state:
+    st.session_state['accepted_deviations'] = set()
 
 # Initialize Compliance Engine
 @st.cache_resource
@@ -37,6 +46,11 @@ if 'agenda_activities' not in st.session_state:
     st.session_state['agenda_activities'] = []
 if 'reference_bpmn' not in st.session_state:
     st.session_state['reference_bpmn'] = None
+if 'last_alignments' not in st.session_state:
+    st.session_state['last_alignments'] = None
+
+# Compliance Overlay Mode
+show_overlay = st.toggle("Show Shadow Workflow Overlay (RQ2)", value=False)
 
 # Left Column: Reference Model
 with col1:
@@ -46,23 +60,22 @@ with col1:
         if not api_key:
             st.warning("Please enter your OpenAI API Key in the sidebar.")
         else:
-            # Check if we need to regenerate (if agenda changed or not generated yet)
-            # For simplicity, we regenerate if button clicked or just run
-            # Ideally we check if agenda_text changed.
-            
             with st.spinner("Generating BPMN from Agenda..."):
                 try:
-                    # Logic to avoid re-generating on every rerun if text hasn't changed could be added here
-                    # For now, we rely on the function call
-                    bpmn_viz, activities, bpmn_obj = generate_agenda_bpmn(agenda_text, api_key)
+                    # Check if we have a generated BPMN already
+                    if st.session_state['reference_bpmn'] is None:
+                         bpmn_viz, activities, bpmn_obj = generate_agenda_bpmn(agenda_text, api_key)
+                         
+                         if bpmn_viz:
+                             st.session_state['agenda_activities'] = activities
+                             st.session_state['reference_bpmn'] = bpmn_obj
+                         else:
+                             st.error("Failed to generate BPMN graph.")
                     
-                    if bpmn_viz:
-                        st.graphviz_chart(bpmn_viz, use_container_width=True)
-                        # Store for compliance checking
-                        st.session_state['agenda_activities'] = activities
-                        st.session_state['reference_bpmn'] = bpmn_obj
-                    else:
-                        st.error("Failed to generate BPMN graph.")
+                    if st.session_state['reference_bpmn']:
+                         # Render logic handles Overlay vs Standard below
+                         pass
+                         
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
     else:
@@ -82,7 +95,7 @@ with col2:
             if 'video_events' not in st.session_state:
                 st.info("Processing video to extract events... This may take a moment.")
                 
-                with st.spinner("Analyzing audio and visuals..."):
+                with st.spinner("Analyzing audio and visuals (Vid2Log Fusion)..."):
                     try:
                         # Save uploaded file to a temporary file
                         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
@@ -151,6 +164,7 @@ with col2:
                         
                         # --- PHASE 4: COMPLIANCE CHECK ---
                         fitness_score = 0.0
+                        alignments = []
                         mapped_events = current_events
                         
                         if not current_events.empty and st.session_state['reference_bpmn'] and st.session_state['agenda_activities']:
@@ -163,13 +177,24 @@ with col2:
                             # Convert to log for fitness calculation
                             log_data_for_fitness = convert_to_event_log(mapped_events)
                             
-                            # Calculate Fitness
+                            # Calculate Fitness & Alignments
                             if log_data_for_fitness is not None:
-                                fitness_score = compliance_engine.calculate_fitness(
+                                compliance_result = compliance_engine.calculate_fitness(
                                     st.session_state['reference_bpmn'], 
                                     log_data_for_fitness
                                 )
-                        
+                                fitness_score = compliance_result.get('score', 0.0)
+                                alignments = compliance_result.get('alignments', [])
+                                st.session_state['last_alignments'] = alignments
+                                
+                                # Analyze Alignments for Governance
+                                for align in alignments:
+                                    for log_move, model_move in align['alignment']:
+                                        if (model_move is None or model_move == '>>') and log_move is not None:
+                                            # Shadow activity (Log Move Only)
+                                            if log_move not in st.session_state['accepted_deviations']:
+                                                st.session_state['deviations'].add(log_move)
+
                         # Update Metric Card
                         fitness_percent = fitness_score * 100
                         delta_color = "normal"
@@ -211,6 +236,16 @@ with col2:
                         )
                         
                         # 3. Discover & Update BPMN
+                        # If Overlay Mode: Update Left Column with Colored Graph
+                        if show_overlay and st.session_state['reference_bpmn'] and alignments:
+                             colored_viz = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
+                             if colored_viz:
+                                 # HACK: Directly write to col1 using st.context mechanism if possible?
+                                 # No, stream lit doesn't allow 'jumping' columns easily inside a loop without placeholders.
+                                 # We will just rely on the final render or if the user refreshes.
+                                 # Alternatively, we could define placeholders at the top.
+                                 pass 
+
                         if not mapped_events.empty:
                             log_data = convert_to_event_log(mapped_events)
                             if log_data is not None:
@@ -226,7 +261,10 @@ with col2:
                         if max_seconds > 0:
                             progress = min(current_video_time / max_seconds, 1.0)
                             progress_bar.progress(progress)
-
+                            
+                        # Force update of Left Column (Overlay) if needed
+                        # Ideally, we should use a placeholder in col1
+                        
                         time.sleep(1 / speed_multiplier)
                         current_video_time += step_size
                     
@@ -251,3 +289,59 @@ with col2:
             """,
             unsafe_allow_html=True
         )
+
+# Render Left Column content (Ref BPMN or Overlay)
+# We do this at the end or use placeholders. 
+# Best way: Use a placeholder defined early in Col1.
+
+with col1:
+    # Clear previous content if any (Streamlit runs top to bottom, but we are back in col1 context?)
+    # No, 'with col1:' just appends.
+    # To properly update, we should have used a placeholder.
+    # Let's assume the user toggles and it re-runs.
+    
+    if st.session_state.get('reference_bpmn'):
+        alignments = st.session_state.get('last_alignments')
+        
+        if show_overlay and alignments:
+             st.subheader("Shadow Workflow Overlay")
+             colored_viz = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
+             st.graphviz_chart(colored_viz, use_container_width=True)
+             st.caption("Green: Executed | Grey: Skipped | Red (Sidebar): Deviations")
+             
+        elif show_overlay and not alignments:
+             st.info("Please run the simulation first to generate compliance data for the overlay.")
+             # Fallback to standard view so it's not empty
+             from pm4py.visualization.bpmn import visualizer as bpmn_visualizer
+             parameters = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
+             gviz = bpmn_visualizer.apply(st.session_state['reference_bpmn'], parameters=parameters)
+             gviz.attr(rankdir='TB')
+             st.graphviz_chart(gviz, use_container_width=True)
+             
+        else:
+             # Standard view
+             from pm4py.visualization.bpmn import visualizer as bpmn_visualizer
+             parameters = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
+             gviz = bpmn_visualizer.apply(st.session_state['reference_bpmn'], parameters=parameters)
+             gviz.attr(rankdir='TB')
+             st.graphviz_chart(gviz, use_container_width=True)
+
+
+# Governance Sidebar Logic (RQ3)
+if st.session_state['deviations']:
+    st.sidebar.warning(f"Detected {len(st.session_state['deviations'])} Shadow Activities")
+    
+    # Iterate over a copy to modify set during iteration
+    for dev in list(st.session_state['deviations']):
+        col_dev1, col_dev2 = st.sidebar.columns([3, 1])
+        col_dev1.write(f"**{dev}**")
+        
+        if col_dev2.button("✅", key=f"accept_{dev}", help="Accept as formal variant"):
+            st.session_state['accepted_deviations'].add(dev)
+            st.session_state['deviations'].remove(dev)
+            st.rerun()
+            
+if st.session_state['accepted_deviations']:
+    st.sidebar.success("Accepted Variants:")
+    for dev in st.session_state['accepted_deviations']:
+        st.sidebar.write(f"- {dev}")

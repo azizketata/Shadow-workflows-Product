@@ -74,17 +74,20 @@ class ComplianceEngine:
 
     def calculate_fitness(self, reference_bpmn, log_df):
         """
-        Calculate fitness between the reference BPMN model and the event log.
+        Calculate fitness and return detailed alignments for visualization.
         
         Args:
             reference_bpmn (pm4py.objects.bpmn.obj.BPMN): The reference model.
             log_df (pd.DataFrame): The mapped event log.
             
         Returns:
-            float: Fitness score (0.0 - 1.0)
+            dict: {
+                'score': float,
+                'alignments': list
+            }
         """
         if reference_bpmn is None or log_df is None or log_df.empty:
-            return 0.0
+            return {'score': 0.0, 'alignments': []}
             
         try:
             # Convert BPMN to Petri Net for conformance checking
@@ -93,10 +96,15 @@ class ComplianceEngine:
             # Calculate fitness using token-based replay (fast)
             fitness = pm4py.fitness_token_based_replay(log_df, net, initial_marking, final_marking)
             
-            # Extract log fitness
-            return fitness['log_fitness']
+            # Calculate Alignments for visualization
+            alignments = pm4py.conformance_diagnostics_alignments(log_df, net, initial_marking, final_marking)
+            
+            return {
+                'score': fitness['log_fitness'],
+                'alignments': alignments
+            }
             
         except Exception as e:
             print(f"Error calculating fitness: {e}")
-            return 0.0
+            return {'score': 0.0, 'alignments': []}
 

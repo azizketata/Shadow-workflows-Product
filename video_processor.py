@@ -7,6 +7,9 @@ from moviepy import VideoFileClip
 from openai import OpenAI
 import time
 
+import spacy
+import re
+
 class VideoProcessor:
     def __init__(self, api_key):
         """
@@ -20,6 +23,49 @@ class VideoProcessor:
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
+        
+        # Load spaCy model
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            # Fallback if model not found, though it should be installed
+            import subprocess
+            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+            self.nlp = spacy.load("en_core_web_sm")
+            
+    def extract_action_object(self, text):
+        """
+        Extract potential activities using NLP (Verb + Object).
+        Returns a suggested Activity Name or None.
+        """
+        if not text:
+            return None, None
+            
+        try:
+            doc = self.nlp(text)
+        except Exception:
+            return "Discussion", text
+        
+        # 1. Keyword Mapping (Heuristics for common meeting terms)
+        text_lower = text.lower()
+        if "move" in text_lower or "motion" in text_lower:
+            return "Propose Motion", text
+        if "second" in text_lower:
+            return "Second Motion", text
+        if "vote" in text_lower or "all in favor" in text_lower or "opposed" in text_lower:
+            return "Call for Vote", text
+        if "adjourn" in text_lower:
+            return "Adjourn Meeting", text
+            
+        # 2. General NLP Extraction (Verb + Object)
+        for token in doc:
+            if token.pos_ == "VERB":
+                # Find direct object
+                for child in token.children:
+                    if child.dep_ == "dobj":
+                        return f"{token.lemma_.capitalize()} {child.text.capitalize()}", text
+                        
+        return "Discussion", text # Default fallback
 
     def extract_audio(self, video_path):
         """
@@ -34,7 +80,8 @@ class VideoProcessor:
             
             try:
                 # Write audio to the temp file
-                video.audio.write_audiofile(audio_path, verbose=False, logger=None)
+                # verbose deprecated in recent moviepy versions, remove it
+                video.audio.write_audiofile(audio_path, logger=None)
             finally:
                 video.close()
                 
@@ -68,13 +115,22 @@ class VideoProcessor:
                 seconds = int(start_time % 60)
                 timestamp_str = f"{minutes:02d}:{seconds:02d}"
                 
-                events.append({
-                    'timestamp': timestamp_str,
-                    'activity_name': 'Discussion',
-                    'source': 'Audio',
-                    'details': segment.text[:50] + "..." if len(segment.text) > 50 else segment.text,
-                    'raw_seconds': start_time
-                })
+                text_content = segment.text.strip()
+                if not text_content:
+                    continue
+                    
+                activity_name, full_text = self.extract_action_object(text_content)
+                
+                # Double check to ensure we have valid text before appending
+                if full_text:
+                    events.append({
+                        'timestamp': timestamp_str,
+                        'activity_name': activity_name,
+                        'source': 'Audio',
+                        'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
+                        'raw_seconds': start_time,
+                        'original_text': full_text
+                    })
                 
         except Exception as e:
             print(f"Error transcribing audio: {e}")
@@ -154,6 +210,65 @@ class VideoProcessor:
         cap.release()
         return events
 
+    def fuse_events(self, audio_events, visual_events):
+        """
+        Fuse audio and visual events based on temporal proximity and logic.
+        """
+        fused_events = []
+        
+        # Convert to DataFrames for easier handling if they aren't already
+        df_audio = pd.DataFrame(audio_events)
+        df_visual = pd.DataFrame(visual_events)
+        
+        if df_audio.empty and df_visual.empty:
+            return []
+            
+        if df_visual.empty:
+            return audio_events
+            
+        if df_audio.empty:
+            return visual_events
+
+        # Track used visual events to avoid duplication
+        used_visual_indices = set()
+
+        # Iterate through audio events (primary stream)
+        for _, audio_row in df_audio.iterrows():
+            # Check for visual confirmation (Voting)
+            # Logic: If Audio says "Vote" and Visual has "Voting" within +/- 5 seconds
+            
+            is_vote_context = "Vote" in audio_row['activity_name']
+            
+            # Find nearby visual events
+            nearby_visuals = df_visual[
+                (df_visual['raw_seconds'] >= audio_row['raw_seconds'] - 5) & 
+                (df_visual['raw_seconds'] <= audio_row['raw_seconds'] + 5)
+            ]
+            
+            if is_vote_context and not nearby_visuals.empty:
+                # FUSION: Confirmed Vote
+                fused_events.append({
+                    'timestamp': audio_row['timestamp'],
+                    'activity_name': 'Confirmed Vote', # Fused Event Name
+                    'source': 'Fused (Audio+Video)',
+                    'details': f"Audio: {audio_row['details']} | Visual: {len(nearby_visuals)} hands detected",
+                    'raw_seconds': audio_row['raw_seconds']
+                })
+                # Mark these visual events as consumed
+                for idx in nearby_visuals.index:
+                    used_visual_indices.add(idx)
+            else:
+                # No fusion, keep original audio event
+                fused_events.append(audio_row.to_dict())
+                
+        # Add visual events that weren't used in fusion
+        # For independent gestures
+        for idx, vis_row in df_visual.iterrows():
+             if idx not in used_visual_indices:
+                 fused_events.append(vis_row.to_dict())
+             
+        return fused_events
+
     def process_video(self, video_path):
         """
         Main method to process both audio and visuals.
@@ -166,13 +281,13 @@ class VideoProcessor:
         # 2. Process Visuals
         visual_events = self.process_visuals(video_path)
         
-        # 3. Combine and Sort
-        all_events = audio_events + visual_events
+        # 3. Fuse
+        fused_list = self.fuse_events(audio_events, visual_events)
         
-        if not all_events:
+        if not fused_list:
             return pd.DataFrame(columns=['timestamp', 'activity_name', 'source', 'details'])
             
-        df = pd.DataFrame(all_events)
+        df = pd.DataFrame(fused_list)
         df = df.sort_values(by='raw_seconds').drop(columns=['raw_seconds']).reset_index(drop=True)
         
         return df

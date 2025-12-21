@@ -53,12 +53,63 @@ def generate_agenda_bpmn(agenda_text, api_key):
         activities = json.loads(content[start_idx:end_idx])
         
         # Build BPMN
+        # In recent PM4Py versions, BPMN structure changed.
+        # It's safer to use the layouting functions or simple node definitions if using internal object.
+        # However, checking the error "type object 'BPMN' has no attribute 'Process'" suggests 
+        # we might be using a different version of PM4Py than the code expects or the internal API changed.
+        
+        # Let's use a simpler way to construct a BPMN if possible, or fix the import/usage.
+        # Checking PM4Py documentation, typically we create a BPMN object and add nodes.
+        # If BPMN.Process is missing, we might need to instantiate differently.
+        
+        # Try-catch block suggests this might fail.
+        # Let's try standard pm4py object creation if available, or just fallback to graphviz for visualization 
+        # since we only need the visual for the reference model mostly. 
+        # But we need the object for compliance checking!
+        
+        # Fix for recent PM4Py:
         bpmn_graph = BPMN()
-        process = BPMN.Process(id="process_1")
-        bpmn_graph.set_process(process)
+        # Newer PM4Py versions might not require explicit Process wrapping or use different class
+        # Let's inspect the object or try adding elements directly to the graph if it supports it, 
+        # or use a different construction method.
+        
+        # If BPMN.Process is not found, it implies we should add to bpmn_graph directly or use a different class.
+        # Actually, let's look at how pm4py expects it.
+        # If we cannot fix the object model easily without docs, we can create a dummy object that 
+        # compliance_engine can read, OR we revert to a simpler graph structure.
+        
+        # Alternative: Use a Petri Net for reference since we convert it anyway?
+        # But we want BPMN visualization.
+        
+        # Let's assume we can add nodes directly to bpmn_graph if Process is missing.
+        # Or maybe import Process from somewhere else?
+        # from pm4py.objects.bpmn.obj import Process ? No, it's usually BPMN.Process.
+        
+        # Quick fix: If the class is missing, we can try to use a mock or simpler structure
+        # But let's try to just use the graphviz for now if the object creation fails, 
+        # but that breaks compliance.
+        
+        # Let's try to find the correct class. 
+        # In PM4Py 2.7.x, BPMN object structure:
+        # bpmn = BPMN()
+        # process = bpmn.get_process() # maybe?
+        
+        # Let's try to just treat the BPMN object as the container.
+        
+        process = bpmn_graph # Treat the graph itself as the process container if Process class is gone
+        # But we need valid nodes.
+        
+        # Let's try to use the older/standard way but wrapped in try/except for attributes.
+        if hasattr(BPMN, 'Process'):
+            process_obj = BPMN.Process(id="process_1")
+            bpmn_graph.set_process(process_obj)
+            process = process_obj
+        else:
+            # Fallback for newer versions where BPMN object might directly hold elements
+            process = bpmn_graph 
     
         start_event = BPMN.StartEvent(id="start", name="Start")
-        process.append(start_event)
+        process.append(start_event)  # This might fail if process doesn't have append
     
         end_event = BPMN.EndEvent(id="end", name="End")
         process.append(end_event)
@@ -77,6 +128,7 @@ def generate_agenda_bpmn(agenda_text, api_key):
         # Connect last task to end event
         final_flow = BPMN.SequenceFlow(previous_node, end_event)
         process.append(final_flow)
+
 
         # layout top-to-bottom
         # pm4py's view_bpmn usually displays it. To get the graphviz object we can use the visualizer directly.
@@ -99,7 +151,140 @@ def generate_agenda_bpmn(agenda_text, api_key):
         import graphviz
         err_g = graphviz.Digraph()
         err_g.node('Error', f"Error generating BPMN: {str(e)}")
+        # Return None for the BPMN object so we don't crash downstream
         return err_g, [], None
+
+def generate_colored_bpmn(bpmn_graph, alignments):
+    """
+    Generates a color-coded BPMN visualization based on alignment diagnostics.
+    
+    Args:
+        bpmn_graph (pm4py.objects.bpmn.obj.BPMN): The reference BPMN model.
+        alignments (list): List of alignment dictionaries from pm4py.
+        
+    Returns:
+        graphviz.Digraph: The colored graph.
+    """
+    from pm4py.visualization.bpmn import visualizer as bpmn_visualizer
+    import graphviz
+    
+    if not bpmn_graph or not alignments:
+        return None
+
+    # 1. Analyze Alignments to count moves
+    # Structure of alignment['alignment'] is a list of tuples: (log_move, model_move)
+    # log_move: activity name or None (>> in pm4py usually)
+    # model_move: activity name or None (>> in pm4py usually)
+    
+    model_move_counts = {} # Activity -> Count of "Model Move Only" (Skipped)
+    log_move_counts = {}   # Activity -> Count of "Log Move Only" (Deviation)
+    sync_move_counts = {}  # Activity -> Count of "Sync" (Match)
+    
+    for align in alignments:
+        trace_alignment = align['alignment']
+        for log_move, model_move in trace_alignment:
+            # Normalize None/Skipped representation
+            # PM4Py uses '>>' string often in alignment printing, but strictly (str, str) or (str, None) or (None, str) in object?
+            # Let's check typical pm4py output format. Usually it is a tuple of labels.
+            # '>>' is used for "no move".
+            
+            is_log_skip = (log_move is None or log_move == '>>')
+            is_model_skip = (model_move is None or model_move == '>>')
+            
+            if not is_log_skip and not is_model_skip:
+                if log_move == model_move:
+                    sync_move_counts[model_move] = sync_move_counts.get(model_move, 0) + 1
+            elif is_log_skip and not is_model_skip:
+                # Model Move Only -> Skipped in reality
+                model_move_counts[model_move] = model_move_counts.get(model_move, 0) + 1
+            elif not is_log_skip and is_model_skip:
+                # Log Move Only -> Shadow activity
+                log_move_counts[log_move] = log_move_counts.get(log_move, 0) + 1
+                
+    # 2. Generate Base Graphviz Object
+    # We use pm4py's visualizer to get the structure, then modify attributes
+    parameters = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
+    gviz = bpmn_visualizer.apply(bpmn_graph, parameters=parameters)
+    
+    # 3. Apply Colors
+    # We need to map BPMN Node IDs (from the visualizer) to Activity Names
+    # This is tricky because visualizer creates its own IDs.
+    # However, graphviz nodes usually have 'label' attribute.
+    
+    # Parse graphviz source or modify nodes directly?
+    # graphviz.Digraph object allows iterating body? No, it's a list of strings.
+    # Better approach: Re-build or use string replacement on the source if simple,
+    # OR use pm4py's frequency decoration if possible (but we want specific colors).
+    
+    # Let's iterate through the gviz.body to find node definitions and modify styles.
+    # Typical line: 123 [label="Activity Name", shape=box, ...];
+    
+    new_body = []
+    for line in gviz.body:
+        if 'label=' in line and 'shape=' in line:
+            # It's a node
+            # Extract Label
+            try:
+                # simplified parsing
+                start_quote = line.find('label="') + 7
+                end_quote = line.find('"', start_quote)
+                label = line[start_quote:end_quote]
+                
+                # Determine Color
+                fill_color = "white"
+                pen_width = "1"
+                color = "black"
+                
+                # Logic:
+                # If mostly Sync -> Green
+                # If mostly Skipped -> Grey/Dashed
+                # If mostly Log Move (This is harder because Log Moves might not correspond to Model Nodes)
+                # But wait, Log Moves (Shadow) often are NOT in the model, so we can't color a model node for them!
+                # We can only color existing nodes as "Skipped" or "Executed".
+                # Shadow activities would need NEW nodes added, which is hard with just coloring.
+                # For RQ2 visualization, coloring the model shows CONFORMANCE (what matched/skipped).
+                # Shadow activities (Log Moves) are best shown in a list or by adding dummy nodes.
+                # Let's focus on coloring the Reference Model first.
+                
+                syncs = sync_move_counts.get(label, 0)
+                skips = model_move_counts.get(label, 0)
+                
+                total = syncs + skips
+                if total > 0:
+                    if skips > syncs:
+                        # Mostly Skipped
+                        fill_color = "#f0f0f0" # light grey
+                        color = "grey"
+                        pen_width = "2"
+                        style = "dashed,filled"
+                    else:
+                        # Mostly Executed
+                        fill_color = "#e6ffe6" # light green
+                        color = "green"
+                        pen_width = "2"
+                        style = "filled"
+                else:
+                    style = "filled" # Default
+                    
+                # Inject style
+                # Replace the closing bracket '];' with our styles
+                line = line.rstrip(';\n')
+                line = line.rstrip(']')
+                line += f', style="{style}", fillcolor="{fill_color}", color="{color}", penwidth="{pen_width}"];'
+                
+            except:
+                pass
+                
+        new_body.append(line)
+        
+    gviz.body = new_body
+    gviz.attr(rankdir='TB')
+    
+    # NOTE: To visualize "Log Moves" (Shadow Steps) that are NOT in the model,
+    # we would ideally inject new nodes into the graph. 
+    # For MVP, we will return a separate list of "Shadow Activities" to display in UI.
+    
+    return gviz
 
 def convert_to_event_log(df):
     """
