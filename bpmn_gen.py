@@ -52,83 +52,32 @@ def generate_agenda_bpmn(agenda_text, api_key):
             
         activities = json.loads(content[start_idx:end_idx])
         
-        # Build BPMN
-        # In recent PM4Py versions, BPMN structure changed.
-        # It's safer to use the layouting functions or simple node definitions if using internal object.
-        # However, checking the error "type object 'BPMN' has no attribute 'Process'" suggests 
-        # we might be using a different version of PM4Py than the code expects or the internal API changed.
-        
-        # Let's use a simpler way to construct a BPMN if possible, or fix the import/usage.
-        # Checking PM4Py documentation, typically we create a BPMN object and add nodes.
-        # If BPMN.Process is missing, we might need to instantiate differently.
-        
-        # Try-catch block suggests this might fail.
-        # Let's try standard pm4py object creation if available, or just fallback to graphviz for visualization 
-        # since we only need the visual for the reference model mostly. 
-        # But we need the object for compliance checking!
-        
-        # Fix for recent PM4Py:
+        # Build BPMN using PM4Py 2.7.x API
+        # In recent versions, we add nodes directly to the graph using add_node() and add_flow()
         bpmn_graph = BPMN()
-        # Newer PM4Py versions might not require explicit Process wrapping or use different class
-        # Let's inspect the object or try adding elements directly to the graph if it supports it, 
-        # or use a different construction method.
         
-        # If BPMN.Process is not found, it implies we should add to bpmn_graph directly or use a different class.
-        # Actually, let's look at how pm4py expects it.
-        # If we cannot fix the object model easily without docs, we can create a dummy object that 
-        # compliance_engine can read, OR we revert to a simpler graph structure.
+        # Create nodes
+        start_event = BPMN.StartEvent(name="Start")
+        bpmn_graph.add_node(start_event)
         
-        # Alternative: Use a Petri Net for reference since we convert it anyway?
-        # But we want BPMN visualization.
+        end_event = BPMN.EndEvent(name="End")
+        bpmn_graph.add_node(end_event)
         
-        # Let's assume we can add nodes directly to bpmn_graph if Process is missing.
-        # Or maybe import Process from somewhere else?
-        # from pm4py.objects.bpmn.obj import Process ? No, it's usually BPMN.Process.
-        
-        # Quick fix: If the class is missing, we can try to use a mock or simpler structure
-        # But let's try to just use the graphviz for now if the object creation fails, 
-        # but that breaks compliance.
-        
-        # Let's try to find the correct class. 
-        # In PM4Py 2.7.x, BPMN object structure:
-        # bpmn = BPMN()
-        # process = bpmn.get_process() # maybe?
-        
-        # Let's try to just treat the BPMN object as the container.
-        
-        process = bpmn_graph # Treat the graph itself as the process container if Process class is gone
-        # But we need valid nodes.
-        
-        # Let's try to use the older/standard way but wrapped in try/except for attributes.
-        if hasattr(BPMN, 'Process'):
-            process_obj = BPMN.Process(id="process_1")
-            bpmn_graph.set_process(process_obj)
-            process = process_obj
-        else:
-            # Fallback for newer versions where BPMN object might directly hold elements
-            process = bpmn_graph 
-    
-        start_event = BPMN.StartEvent(id="start", name="Start")
-        process.append(start_event)  # This might fail if process doesn't have append
-    
-        end_event = BPMN.EndEvent(id="end", name="End")
-        process.append(end_event)
-    
         previous_node = start_event
         
         for i, act_label in enumerate(activities):
-            task = BPMN.Task(id=f"task_{i}", name=act_label)
-            process.append(task)
+            task = BPMN.Task(name=act_label)
+            bpmn_graph.add_node(task)
             
-            flow = BPMN.SequenceFlow(previous_node, task)
-            process.append(flow)
+            # Add flow from previous node to current task
+            flow = BPMN.Flow(previous_node, task)
+            bpmn_graph.add_flow(flow)
             
             previous_node = task
-    
+        
         # Connect last task to end event
-        final_flow = BPMN.SequenceFlow(previous_node, end_event)
-        process.append(final_flow)
-
+        final_flow = BPMN.Flow(previous_node, end_event)
+        bpmn_graph.add_flow(final_flow)
 
         # layout top-to-bottom
         # pm4py's view_bpmn usually displays it. To get the graphviz object we can use the visualizer directly.
