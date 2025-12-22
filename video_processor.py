@@ -90,54 +90,163 @@ class VideoProcessor:
             print(f"Error extracting audio: {e}")
             return None
 
+    def split_audio_into_chunks(self, audio_path, max_size_mb=24):
+        """
+        Split a large audio file into chunks under the specified size limit.
+        
+        Args:
+            audio_path: Path to the original audio file
+            max_size_mb: Maximum size per chunk in MB (default 24MB to stay under Whisper's 25MB limit)
+            
+        Returns:
+            list: List of tuples (chunk_path, time_offset_seconds)
+        """
+        from pydub import AudioSegment
+        
+        chunks = []
+        
+        try:
+            # Load the audio file
+            audio = AudioSegment.from_file(audio_path)
+            
+            # Get file size in bytes
+            file_size = os.path.getsize(audio_path)
+            max_size_bytes = max_size_mb * 1024 * 1024
+            
+            # If file is small enough, return it directly
+            if file_size <= max_size_bytes:
+                return [(audio_path, 0)]
+            
+            # Calculate chunk duration based on file size ratio
+            # Audio duration in milliseconds
+            total_duration_ms = len(audio)
+            
+            # Estimate how many chunks we need
+            num_chunks = (file_size // max_size_bytes) + 1
+            chunk_duration_ms = total_duration_ms // num_chunks
+            
+            # Split into chunks
+            current_pos = 0
+            chunk_index = 0
+            
+            while current_pos < total_duration_ms:
+                # Calculate end position
+                end_pos = min(current_pos + chunk_duration_ms, total_duration_ms)
+                
+                # Extract chunk
+                chunk_audio = audio[current_pos:end_pos]
+                
+                # Save chunk to temp file
+                fd, chunk_path = tempfile.mkstemp(suffix=".mp3")
+                os.close(fd)
+                
+                chunk_audio.export(chunk_path, format="mp3")
+                
+                # Store chunk info with time offset in seconds
+                time_offset_seconds = current_pos / 1000.0
+                chunks.append((chunk_path, time_offset_seconds))
+                
+                current_pos = end_pos
+                chunk_index += 1
+                
+            print(f"Split audio into {len(chunks)} chunks")
+            return chunks
+            
+        except Exception as e:
+            # Clean up any chunks created before the error
+            for chunk_path, _ in chunks:
+                if chunk_path != audio_path and os.path.exists(chunk_path):
+                    try:
+                        os.remove(chunk_path)
+                    except:
+                        pass
+            print(f"Error splitting audio: {e}")
+            # Fall back to original file
+            return [(audio_path, 0)]
+    
+    def _cleanup_chunk_files(self, chunks, original_audio_path):
+        """
+        Safely clean up all chunk files.
+        
+        Args:
+            chunks: List of (chunk_path, offset) tuples
+            original_audio_path: Path to the original audio file (always clean this up)
+        """
+        for chunk_path, _ in chunks:
+            if chunk_path != original_audio_path and os.path.exists(chunk_path):
+                try:
+                    os.remove(chunk_path)
+                except Exception as e:
+                    print(f"Warning: Could not remove chunk file {chunk_path}: {e}")
+        
+        # Always clean up original audio file
+        if original_audio_path and os.path.exists(original_audio_path):
+            try:
+                os.remove(original_audio_path)
+            except Exception as e:
+                print(f"Warning: Could not remove audio file {original_audio_path}: {e}")
+
     def transcribe_audio(self, audio_path):
         """
         Transcribe audio using OpenAI Whisper API.
+        Handles large files by splitting into chunks under 25MB.
         Returns a list of 'Discussion' events.
         """
         events = []
+        chunks = []
+        
         if not audio_path or not os.path.exists(audio_path):
             return events
 
         try:
-            with open(audio_path, "rb") as audio_file:
-                transcript = self.client.audio.transcriptions.create(
-                    model="whisper-1", 
-                    file=audio_file,
-                    response_format="verbose_json"
-                )
+            # Split audio into chunks if needed
+            chunks = self.split_audio_into_chunks(audio_path)
             
-            # Process segments
-            for segment in transcript.segments:
-                start_time = segment.start
-                # Format timestamp as MM:SS
-                minutes = int(start_time // 60)
-                seconds = int(start_time % 60)
-                timestamp_str = f"{minutes:02d}:{seconds:02d}"
-                
-                text_content = segment.text.strip()
-                if not text_content:
-                    continue
+            for chunk_path, time_offset in chunks:
+                try:
+                    with open(chunk_path, "rb") as audio_file:
+                        transcript = self.client.audio.transcriptions.create(
+                            model="whisper-1", 
+                            file=audio_file,
+                            response_format="verbose_json"
+                        )
                     
-                activity_name, full_text = self.extract_action_object(text_content)
-                
-                # Double check to ensure we have valid text before appending
-                if full_text:
-                    events.append({
-                        'timestamp': timestamp_str,
-                        'activity_name': activity_name,
-                        'source': 'Audio',
-                        'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
-                        'raw_seconds': start_time,
-                        'original_text': full_text
-                    })
+                    # Process segments with time offset adjustment
+                    for segment in transcript.segments:
+                        # Add time offset to get actual timestamp in original video
+                        start_time = segment.start + time_offset
+                        
+                        # Format timestamp as MM:SS
+                        minutes = int(start_time // 60)
+                        seconds = int(start_time % 60)
+                        timestamp_str = f"{minutes:02d}:{seconds:02d}"
+                        
+                        text_content = segment.text.strip()
+                        if not text_content:
+                            continue
+                            
+                        activity_name, full_text = self.extract_action_object(text_content)
+                        
+                        # Double check to ensure we have valid text before appending
+                        if full_text:
+                            events.append({
+                                'timestamp': timestamp_str,
+                                'activity_name': activity_name,
+                                'source': 'Audio',
+                                'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
+                                'raw_seconds': start_time,
+                                'original_text': full_text
+                            })
+                            
+                except Exception as e:
+                    print(f"Error transcribing chunk {chunk_path}: {e}")
+                    continue
                 
         except Exception as e:
             print(f"Error transcribing audio: {e}")
         finally:
-            # Clean up audio file
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
+            # Clean up all chunk files and original audio file
+            self._cleanup_chunk_files(chunks, audio_path)
                 
         return events
 

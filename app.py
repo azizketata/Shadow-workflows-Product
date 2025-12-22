@@ -235,19 +235,25 @@ with col2:
                 # 3. Discover & Update BPMN
                 # If Overlay Mode: Update Left Column with Colored Graph
                 if show_overlay and st.session_state['reference_bpmn'] and alignments:
-                     colored_viz = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
-                     # We can't update Col1 easily from here without a container reference passed down or global state refresh.
-                     # But since the slider triggers a rerun, the bottom logic for Col1 will pick up 'last_alignments'
+                     colored_viz, _ = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
+                     # The bottom logic for Col1 will pick up 'last_alignments' on rerun
                      pass 
 
                 if not mapped_events.empty:
                     log_data = convert_to_event_log(mapped_events)
                     if log_data is not None:
-                        graph = generate_discovered_bpmn(log_data)
+                        graph, evidence_map = generate_discovered_bpmn(log_data)
                         if graph:
-                            # Use streamlit's graphviz_chart, but ensure we use 'width' instead of 'use_container_width' if needed
-                            # Recent Streamlit versions support use_container_width
                             bpmn_container.graphviz_chart(graph, use_container_width=True)
+                            
+                            # Display Evidence Panel - Click to see why each process was added
+                            if evidence_map:
+                                with st.expander("📋 **Click to see Evidence: Why was each process added?**", expanded=False):
+                                    st.markdown("**Select an activity to see the justification:**")
+                                    for activity_name, evidence in evidence_map.items():
+                                        st.markdown(f"**🔹 {activity_name}**")
+                                        st.info(f"_{evidence}_")
+                                        st.markdown("---")
                         else:
                             bpmn_container.info("Not enough data to discover process structure yet.")
                 else:
@@ -287,9 +293,20 @@ with col1:
         
         if show_overlay and alignments:
              st.subheader("Shadow Workflow Overlay")
-             colored_viz = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
+             colored_viz, compliance_info = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
              st.graphviz_chart(colored_viz, use_container_width=True)
-             st.caption("Green: Executed | Grey: Skipped | Red (Sidebar): Deviations")
+             st.caption("🟢 Green: Executed | ⬜ Grey: Skipped | 🔴 Red (Sidebar): Deviations")
+             
+             # Display Compliance Status Panel
+             if compliance_info:
+                 with st.expander("📋 **Click to see Compliance Status for each Agenda Item**", expanded=False):
+                     for activity_name, status in compliance_info.items():
+                         if status == "executed":
+                             st.success(f"✅ **{activity_name}**: Matched with video events")
+                         elif status == "skipped":
+                             st.warning(f"⚠️ **{activity_name}**: Planned but not detected in video")
+                         else:
+                             st.info(f"ℹ️ **{activity_name}**: {status}")
              
         elif show_overlay and not alignments:
              st.info("Please run the simulation first to generate compliance data for the overlay.")
