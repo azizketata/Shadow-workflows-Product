@@ -88,6 +88,9 @@ with col2:
     if uploaded_video is not None:
         st.success(f"Video uploaded: {uploaded_video.name}")
         
+        # Add a video player
+        st.video(uploaded_video)
+        
         if not api_key:
             st.warning("Please enter your OpenAI API Key in the sidebar to process the video.")
         else:
@@ -121,155 +124,134 @@ with col2:
             if 'video_events' in st.session_state:
                 df_events = st.session_state['video_events']
                 
-                # Controls
-                col_ctrl1, col_ctrl2 = st.columns([1, 2])
-                with col_ctrl1:
-                    if st.button("Start Real-time Analysis"):
-                        st.session_state['simulation_active'] = True
+                # Time Selection Slider
+                def time_str_to_seconds(t_str):
+                    m, s = map(int, t_str.split(':'))
+                    return m * 60 + s
+                    
+                max_seconds = 0
+                if not df_events.empty:
+                    max_seconds = time_str_to_seconds(df_events.iloc[-1]['timestamp'])
+                
+                # Interactive slider for video time
+                # Using a unique key helps with state management but can also reset
+                selected_time = st.slider("Jump to Time (seconds)", 0, max_seconds + 30, 0, key="video_time_slider")
+                
+                current_video_time = selected_time
+                
+                # Removed the button and loop for manual control via slider mostly
+                # But to keep "Start Real-time Analysis" as an auto-play feature we can keep it
+                # or just rely on the slider.
+                # The user asked: "while video is playing... i want to be able to change time"
+                # Streamlit's st.video doesn't sync bidirectional with Python backend easily in standard mode.
+                # We can simulate the process state based on the slider value.
                 
                 # UI Containers for dynamic updates
                 status_container = st.empty()
                 bpmn_container = st.empty()
                 
-                # Initial View
-                if 'simulation_active' not in st.session_state:
-                     st.write("Click 'Start Analysis' to simulate real-time discovery.")
-                     st.dataframe(df_events, use_container_width=True, height=200)
-
-                # Simulation Loop
-                if st.session_state.get('simulation_active'):
+                # Simulation Logic based on Slider
+                mins, secs = divmod(current_video_time, 60)
+                time_display = f"{int(mins):02d}:{int(secs):02d}"
+                
+                # 2. Filter Events up to selected time
+                current_events = df_events[
+                    df_events['timestamp'].apply(time_str_to_seconds) <= current_video_time
+                ]
+                
+                # --- PHASE 4: COMPLIANCE CHECK ---
+                fitness_score = 0.0
+                alignments = []
+                mapped_events = current_events
+                
+                if not current_events.empty and st.session_state['reference_bpmn'] and st.session_state['agenda_activities']:
+                    # Map events
+                    mapped_events = compliance_engine.map_events_to_agenda(
+                        current_events, 
+                        st.session_state['agenda_activities']
+                    )
                     
-                    def time_str_to_seconds(t_str):
-                        m, s = map(int, t_str.split(':'))
-                        return m * 60 + s
-                        
-                    max_seconds = 0
-                    if not df_events.empty:
-                        max_seconds = time_str_to_seconds(df_events.iloc[-1]['timestamp'])
+                    # Convert to log for fitness calculation
+                    log_data_for_fitness = convert_to_event_log(mapped_events)
                     
-                    speed_multiplier = 2 
-                    step_size = 5
-                    current_video_time = 0
-                    progress_bar = st.progress(0)
-                    
-                    while current_video_time <= max_seconds + step_size:
-                        # 1. Update Status
-                        mins, secs = divmod(current_video_time, 60)
-                        time_display = f"{int(mins):02d}:{int(secs):02d}"
-                        
-                        # 2. Filter Events
-                        current_events = df_events[
-                            df_events['timestamp'].apply(time_str_to_seconds) <= current_video_time
-                        ]
-                        
-                        # --- PHASE 4: COMPLIANCE CHECK ---
-                        fitness_score = 0.0
-                        alignments = []
-                        mapped_events = current_events
-                        
-                        if not current_events.empty and st.session_state['reference_bpmn'] and st.session_state['agenda_activities']:
-                            # Map events
-                            mapped_events = compliance_engine.map_events_to_agenda(
-                                current_events, 
-                                st.session_state['agenda_activities']
-                            )
-                            
-                            # Convert to log for fitness calculation
-                            log_data_for_fitness = convert_to_event_log(mapped_events)
-                            
-                            # Calculate Fitness & Alignments
-                            if log_data_for_fitness is not None:
-                                compliance_result = compliance_engine.calculate_fitness(
-                                    st.session_state['reference_bpmn'], 
-                                    log_data_for_fitness
-                                )
-                                fitness_score = compliance_result.get('score', 0.0)
-                                alignments = compliance_result.get('alignments', [])
-                                st.session_state['last_alignments'] = alignments
-                                
-                                # Analyze Alignments for Governance
-                                for align in alignments:
-                                    for log_move, model_move in align['alignment']:
-                                        if (model_move is None or model_move == '>>') and log_move is not None:
-                                            # Shadow activity (Log Move Only)
-                                            if log_move not in st.session_state['accepted_deviations']:
-                                                st.session_state['deviations'].add(log_move)
-
-                        # Update Metric Card
-                        fitness_percent = fitness_score * 100
-                        delta_color = "normal"
-                        warning_msg = ""
-                        
-                        if fitness_percent < 50 and not current_events.empty:
-                            delta_color = "inverse"
-                            warning_msg = "⚠️ Meeting deviating from Agenda!"
-                            
-                        metric_container.metric(
-                            label="Process Fitness Score (Behavioral Alignment)",
-                            value=f"{fitness_percent:.1f}%",
-                            delta=f"{fitness_percent-100:.1f}%" if fitness_percent < 100 else "Perfect",
-                            delta_color=delta_color
+                    # Calculate Fitness & Alignments
+                    if log_data_for_fitness is not None:
+                        compliance_result = compliance_engine.calculate_fitness(
+                            st.session_state['reference_bpmn'], 
+                            log_data_for_fitness
                         )
-                        if warning_msg:
-                            st.warning(warning_msg)
-
-                        # Update Status Display
-                        last_action = "Waiting..."
-                        if not mapped_events.empty:
-                            last_row = mapped_events.iloc[-1]
-                            act_name = last_row.get('mapped_activity', last_row['activity_name'])
-                            original = last_row['activity_name']
-                            source = last_row['source']
-                            last_action = f"{act_name} (Source: {source})"
-                            if 'mapped_activity' in last_row and last_row['mapped_activity'] != last_row['activity_name']:
-                                last_action += f" [Mapped from: {original}]"
+                        fitness_score = compliance_result.get('score', 0.0)
+                        alignments = compliance_result.get('alignments', [])
+                        st.session_state['last_alignments'] = alignments
                         
-                        status_container.markdown(
-                            f"""
-                            <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
-                                <strong>Video Time:</strong> {time_display} <br>
-                                <strong>Latest Event:</strong> {last_action} <br>
-                                <strong>Events Detected:</strong> {len(current_events)}
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-                        
-                        # 3. Discover & Update BPMN
-                        # If Overlay Mode: Update Left Column with Colored Graph
-                        if show_overlay and st.session_state['reference_bpmn'] and alignments:
-                             colored_viz = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
-                             if colored_viz:
-                                 # HACK: Directly write to col1 using st.context mechanism if possible?
-                                 # No, stream lit doesn't allow 'jumping' columns easily inside a loop without placeholders.
-                                 # We will just rely on the final render or if the user refreshes.
-                                 # Alternatively, we could define placeholders at the top.
-                                 pass 
+                        # Analyze Alignments for Governance
+                        for align in alignments:
+                            for log_move, model_move in align['alignment']:
+                                if (model_move is None or model_move == '>>') and log_move is not None:
+                                    # Shadow activity (Log Move Only)
+                                    if log_move not in st.session_state['accepted_deviations']:
+                                        st.session_state['deviations'].add(log_move)
 
-                        if not mapped_events.empty:
-                            log_data = convert_to_event_log(mapped_events)
-                            if log_data is not None:
-                                graph = generate_discovered_bpmn(log_data)
-                                if graph:
-                                    bpmn_container.graphviz_chart(graph, use_container_width=True)
-                                else:
-                                    bpmn_container.info("Not enough data to discover process structure yet.")
+                # Update Metric Card
+                fitness_percent = fitness_score * 100
+                delta_color = "normal"
+                warning_msg = ""
+                
+                if fitness_percent < 50 and not current_events.empty:
+                    delta_color = "inverse"
+                    warning_msg = "⚠️ Meeting deviating from Agenda!"
+                    
+                metric_container.metric(
+                    label="Process Fitness Score (Behavioral Alignment)",
+                    value=f"{fitness_percent:.1f}%",
+                    delta=f"{fitness_percent-100:.1f}%" if fitness_percent < 100 else "Perfect",
+                    delta_color=delta_color
+                )
+                if warning_msg:
+                    st.warning(warning_msg)
+
+                # Update Status Display
+                last_action = "Waiting..."
+                if not mapped_events.empty:
+                    last_row = mapped_events.iloc[-1]
+                    act_name = last_row.get('mapped_activity', last_row['activity_name'])
+                    original = last_row['activity_name']
+                    source = last_row['source']
+                    last_action = f"{act_name} (Source: {source})"
+                    if 'mapped_activity' in last_row and last_row['mapped_activity'] != last_row['activity_name']:
+                        last_action += f" [Mapped from: {original}]"
+                
+                status_container.markdown(
+                    f"""
+                    <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 10px;">
+                        <strong>Video Time:</strong> {time_display} <br>
+                        <strong>Latest Event:</strong> {last_action} <br>
+                        <strong>Events Detected:</strong> {len(current_events)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+                
+                # 3. Discover & Update BPMN
+                # If Overlay Mode: Update Left Column with Colored Graph
+                if show_overlay and st.session_state['reference_bpmn'] and alignments:
+                     colored_viz = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
+                     # We can't update Col1 easily from here without a container reference passed down or global state refresh.
+                     # But since the slider triggers a rerun, the bottom logic for Col1 will pick up 'last_alignments'
+                     pass 
+
+                if not mapped_events.empty:
+                    log_data = convert_to_event_log(mapped_events)
+                    if log_data is not None:
+                        graph = generate_discovered_bpmn(log_data)
+                        if graph:
+                            # Use streamlit's graphviz_chart, but ensure we use 'width' instead of 'use_container_width' if needed
+                            # Recent Streamlit versions support use_container_width
+                            bpmn_container.graphviz_chart(graph, use_container_width=True)
                         else:
-                            bpmn_container.info("Waiting for first event...")
-
-                        # Update Progress
-                        if max_seconds > 0:
-                            progress = min(current_video_time / max_seconds, 1.0)
-                            progress_bar.progress(progress)
-                            
-                        # Force update of Left Column (Overlay) if needed
-                        # Ideally, we should use a placeholder in col1
-                        
-                        time.sleep(1 / speed_multiplier)
-                        current_video_time += step_size
-                    
-                    st.success("Simulation Complete")
-                    st.session_state['simulation_active'] = False
+                            bpmn_container.info("Not enough data to discover process structure yet.")
+                else:
+                    bpmn_container.info("Waiting for first event...")
                 
                 if st.button("Clear Data & Reset"):
                     del st.session_state['video_events']
