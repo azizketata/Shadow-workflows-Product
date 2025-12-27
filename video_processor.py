@@ -90,25 +90,28 @@ class VideoProcessor:
             print(f"Error extracting audio: {e}")
             return None
 
-    def split_audio_into_chunks(self, audio_path, max_size_mb=24):
+    def split_audio_into_chunks(self, audio_path, max_size_mb=20):
         """
         Split a large audio file into chunks under the specified size limit.
+        Uses moviepy which is already installed and has ffmpeg bundled.
         
         Args:
             audio_path: Path to the original audio file
-            max_size_mb: Maximum size per chunk in MB (default 24MB to stay under Whisper's 25MB limit)
+            max_size_mb: Maximum size per chunk in MB (default 20MB to safely stay under Whisper's 25MB limit)
             
         Returns:
             list: List of tuples (chunk_path, time_offset_seconds)
         """
-        from pydub import AudioSegment
+        from moviepy import AudioFileClip
+        import logging
+        
+        # Suppress moviepy's verbose logging
+        logging.getLogger("moviepy").setLevel(logging.ERROR)
         
         chunks = []
+        audio_clip = None
         
         try:
-            # Load the audio file
-            audio = AudioSegment.from_file(audio_path)
-            
             # Get file size in bytes
             file_size = os.path.getsize(audio_path)
             max_size_bytes = max_size_mb * 1024 * 1024
@@ -117,34 +120,40 @@ class VideoProcessor:
             if file_size <= max_size_bytes:
                 return [(audio_path, 0)]
             
-            # Calculate chunk duration based on file size ratio
-            # Audio duration in milliseconds
-            total_duration_ms = len(audio)
+            # Load the audio file with moviepy
+            audio_clip = AudioFileClip(audio_path)
+            total_duration_seconds = audio_clip.duration
             
-            # Estimate how many chunks we need
-            num_chunks = (file_size // max_size_bytes) + 1
-            chunk_duration_ms = total_duration_ms // num_chunks
+            # Estimate how many chunks we need (add extra margin)
+            num_chunks = (file_size // max_size_bytes) + 2
+            chunk_duration_seconds = total_duration_seconds / num_chunks
             
             # Split into chunks
             current_pos = 0
             chunk_index = 0
             
-            while current_pos < total_duration_ms:
+            while current_pos < total_duration_seconds:
                 # Calculate end position
-                end_pos = min(current_pos + chunk_duration_ms, total_duration_ms)
+                end_pos = min(current_pos + chunk_duration_seconds, total_duration_seconds)
                 
-                # Extract chunk
-                chunk_audio = audio[current_pos:end_pos]
+                # Extract chunk using subclipped
+                chunk_audio = audio_clip.subclipped(current_pos, end_pos)
                 
                 # Save chunk to temp file
                 fd, chunk_path = tempfile.mkstemp(suffix=".mp3")
                 os.close(fd)
                 
-                chunk_audio.export(chunk_path, format="mp3")
+                # Write without progress bar (use bitrate to control size)
+                chunk_audio.write_audiofile(
+                    chunk_path, 
+                    codec='libmp3lame',
+                    bitrate='128k',
+                    logger=None
+                )
+                chunk_audio.close()
                 
                 # Store chunk info with time offset in seconds
-                time_offset_seconds = current_pos / 1000.0
-                chunks.append((chunk_path, time_offset_seconds))
+                chunks.append((chunk_path, current_pos))
                 
                 current_pos = end_pos
                 chunk_index += 1
@@ -163,6 +172,13 @@ class VideoProcessor:
             print(f"Error splitting audio: {e}")
             # Fall back to original file
             return [(audio_path, 0)]
+        finally:
+            # Always close the audio clip to release resources
+            if audio_clip is not None:
+                try:
+                    audio_clip.close()
+                except:
+                    pass
     
     def _cleanup_chunk_files(self, chunks, original_audio_path):
         """

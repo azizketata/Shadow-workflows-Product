@@ -70,13 +70,13 @@ def generate_agenda_bpmn(agenda_text, api_key):
             bpmn_graph.add_node(task)
             
             # Add flow from previous node to current task
-            flow = BPMN.Flow(previous_node, task)
+            flow = BPMN.SequenceFlow(previous_node, task)
             bpmn_graph.add_flow(flow)
             
             previous_node = task
         
         # Connect last task to end event
-        final_flow = BPMN.Flow(previous_node, end_event)
+        final_flow = BPMN.SequenceFlow(previous_node, end_event)
         bpmn_graph.add_flow(final_flow)
 
         # layout top-to-bottom

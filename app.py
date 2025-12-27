@@ -126,18 +126,40 @@ with col2:
                 
                 # Time Selection Slider
                 def time_str_to_seconds(t_str):
-                    m, s = map(int, t_str.split(':'))
-                    return m * 60 + s
+                    parts = t_str.split(':')
+                    if len(parts) == 2:
+                        m, s = map(int, parts)
+                        return m * 60 + s
+                    elif len(parts) == 3:
+                        h, m, s = map(int, parts)
+                        return h * 3600 + m * 60 + s
+                    return 0
+                
+                def seconds_to_time_str(seconds):
+                    """Convert seconds to HH:MM:SS format"""
+                    hours = int(seconds // 3600)
+                    minutes = int((seconds % 3600) // 60)
+                    secs = int(seconds % 60)
+                    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
                     
                 max_seconds = 0
                 if not df_events.empty:
                     max_seconds = time_str_to_seconds(df_events.iloc[-1]['timestamp'])
                 
-                # Interactive slider for video time
-                # Using a unique key helps with state management but can also reset
-                selected_time = st.slider("Jump to Time (seconds)", 0, max_seconds + 30, 0, key="video_time_slider")
+                # Create time options for the slider (every 10 seconds)
+                time_options = [seconds_to_time_str(s) for s in range(0, max_seconds + 60, 10)]
+                if not time_options:
+                    time_options = ["00:00:00"]
                 
-                current_video_time = selected_time
+                # Interactive slider for video time with HH:MM:SS format
+                selected_time_str = st.select_slider(
+                    "Jump to Time (HH:MM:SS)", 
+                    options=time_options, 
+                    value=time_options[0],
+                    key="video_time_slider"
+                )
+                
+                current_video_time = time_str_to_seconds(selected_time_str)
                 
                 # Removed the button and loop for manual control via slider mostly
                 # But to keep "Start Real-time Analysis" as an auto-play feature we can keep it
@@ -151,8 +173,7 @@ with col2:
                 bpmn_container = st.empty()
                 
                 # Simulation Logic based on Slider
-                mins, secs = divmod(current_video_time, 60)
-                time_display = f"{int(mins):02d}:{int(secs):02d}"
+                time_display = seconds_to_time_str(current_video_time)
                 
                 # 2. Filter Events up to selected time
                 current_events = df_events[
@@ -244,7 +265,7 @@ with col2:
                     if log_data is not None:
                         graph, evidence_map = generate_discovered_bpmn(log_data)
                         if graph:
-                            bpmn_container.graphviz_chart(graph, use_container_width=True)
+                            bpmn_container.graphviz_chart(graph, width='stretch')
                             
                             # Display Evidence Panel - Click to see why each process was added
                             if evidence_map:
@@ -294,7 +315,7 @@ with col1:
         if show_overlay and alignments:
              st.subheader("Shadow Workflow Overlay")
              colored_viz, compliance_info = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
-             st.graphviz_chart(colored_viz, use_container_width=True)
+             st.graphviz_chart(colored_viz, width='stretch')
              st.caption("🟢 Green: Executed | ⬜ Grey: Skipped | 🔴 Red (Sidebar): Deviations")
              
              # Display Compliance Status Panel
@@ -315,7 +336,7 @@ with col1:
              parameters = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
              gviz = bpmn_visualizer.apply(st.session_state['reference_bpmn'], parameters=parameters)
              gviz.attr(rankdir='TB')
-             st.graphviz_chart(gviz, use_container_width=True)
+             st.graphviz_chart(gviz, width='stretch')
              
         else:
              # Standard view
@@ -323,7 +344,7 @@ with col1:
              parameters = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
              gviz = bpmn_visualizer.apply(st.session_state['reference_bpmn'], parameters=parameters)
              gviz.attr(rankdir='TB')
-             st.graphviz_chart(gviz, use_container_width=True)
+             st.graphviz_chart(gviz, width='stretch')
 
 
 # Governance Sidebar Logic (RQ3)
