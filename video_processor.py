@@ -202,7 +202,7 @@ class VideoProcessor:
             except Exception as e:
                 print(f"Warning: Could not remove audio file {original_audio_path}: {e}")
 
-    def transcribe_audio(self, audio_path):
+    def transcribe_audio(self, audio_path, progress_callback=None):
         """
         Transcribe audio using OpenAI Whisper API.
         Handles large files by splitting into chunks under 25MB.
@@ -216,10 +216,19 @@ class VideoProcessor:
 
         try:
             # Split audio into chunks if needed
+            if progress_callback:
+                progress_callback(35, "Splitting audio into chunks...")
+                
             chunks = self.split_audio_into_chunks(audio_path)
             
-            for chunk_path, time_offset in chunks:
+            total_chunks = len(chunks)
+            for i, (chunk_path, time_offset) in enumerate(chunks):
                 try:
+                    if progress_callback:
+                        # Calculate progress between 40% and 70% based on chunks
+                        percent = 40 + int((i / total_chunks) * 30)
+                        progress_callback(percent, f"Transcribing chunk {i+1}/{total_chunks}...")
+                        
                     with open(chunk_path, "rb") as audio_file:
                         transcript = self.client.audio.transcriptions.create(
                             model="whisper-1", 
@@ -228,15 +237,15 @@ class VideoProcessor:
                         )
                     
                     # Process segments with time offset adjustment
-                    for segment in transcript.segments:
+            for segment in transcript.segments:
                         # Add time offset to get actual timestamp in original video
                         start_time = segment.start + time_offset
                         
-                        # Format timestamp as MM:SS
-                        minutes = int(start_time // 60)
-                        seconds = int(start_time % 60)
-                        timestamp_str = f"{minutes:02d}:{seconds:02d}"
-                        
+                # Format timestamp as MM:SS
+                minutes = int(start_time // 60)
+                seconds = int(start_time % 60)
+                timestamp_str = f"{minutes:02d}:{seconds:02d}"
+                
                         text_content = segment.text.strip()
                         if not text_content:
                             continue
@@ -245,14 +254,14 @@ class VideoProcessor:
                         
                         # Double check to ensure we have valid text before appending
                         if full_text:
-                            events.append({
-                                'timestamp': timestamp_str,
+                events.append({
+                    'timestamp': timestamp_str,
                                 'activity_name': activity_name,
-                                'source': 'Audio',
+                    'source': 'Audio',
                                 'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
                                 'raw_seconds': start_time,
                                 'original_text': full_text
-                            })
+                })
                             
                 except Exception as e:
                     print(f"Error transcribing chunk {chunk_path}: {e}")
@@ -399,21 +408,40 @@ class VideoProcessor:
         Main method to process both audio and visuals.
         Returns a Pandas DataFrame.
         """
+        # Create a progress bar
+        import streamlit as st
+        progress_bar = st.progress(0, text="Starting video analysis...")
+        
         # 1. Process Audio
+        progress_bar.progress(10, text="Extracting audio from video...")
         audio_path = self.extract_audio(video_path)
-        audio_events = self.transcribe_audio(audio_path)
+        
+        progress_bar.progress(30, text="Preparing audio for transcription...")
+        
+        # Pass a lambda to update progress
+        def update_transcription_progress(percent, text):
+            progress_bar.progress(percent, text=text)
+            
+        audio_events = self.transcribe_audio(audio_path, progress_callback=update_transcription_progress)
         
         # 2. Process Visuals
+        progress_bar.progress(70, text="Analyzing visual gestures...")
         visual_events = self.process_visuals(video_path)
         
         # 3. Fuse
+        progress_bar.progress(90, text="Fusing audio and visual events...")
         fused_list = self.fuse_events(audio_events, visual_events)
         
         if not fused_list:
+            progress_bar.empty()
             return pd.DataFrame(columns=['timestamp', 'activity_name', 'source', 'details'])
             
         df = pd.DataFrame(fused_list)
         df = df.sort_values(by='raw_seconds').drop(columns=['raw_seconds']).reset_index(drop=True)
+        
+        progress_bar.progress(100, text="Analysis complete!")
+        time.sleep(1) # Let user see completion
+        progress_bar.empty()
         
         return df
 

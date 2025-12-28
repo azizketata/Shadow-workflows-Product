@@ -62,19 +62,19 @@ with col1:
         else:
             with st.spinner("Generating BPMN from Agenda..."):
                 try:
-                    # Check if we have a generated BPMN already
-                    if st.session_state['reference_bpmn'] is None:
-                         bpmn_viz, activities, bpmn_obj = generate_agenda_bpmn(agenda_text, api_key)
-                         
-                         if bpmn_viz:
-                             st.session_state['agenda_activities'] = activities
-                             st.session_state['reference_bpmn'] = bpmn_obj
-                         else:
-                             st.error("Failed to generate BPMN graph.")
-                    
-                    if st.session_state['reference_bpmn']:
-                         # Render logic handles Overlay vs Standard below
-                         pass
+                        # Check if we have a generated BPMN already
+                        if st.session_state['reference_bpmn'] is None:
+                            bpmn_viz, activities, bpmn_obj = generate_agenda_bpmn(agenda_text, api_key)
+                            
+                            if bpmn_viz:
+                                st.session_state['agenda_activities'] = activities
+                                st.session_state['reference_bpmn'] = bpmn_obj
+                            else:
+                                st.error("Failed to generate BPMN graph.")
+                        
+                        if st.session_state['reference_bpmn']:
+                             # Render logic handles Overlay vs Standard below
+                             pass
                          
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
@@ -141,7 +141,7 @@ with col2:
                     minutes = int((seconds % 3600) // 60)
                     secs = int(seconds % 60)
                     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-                    
+                        
                 max_seconds = 0
                 if not df_events.empty:
                     max_seconds = time_str_to_seconds(df_events.iloc[-1]['timestamp'])
@@ -212,7 +212,7 @@ with col2:
                                     # Shadow activity (Log Move Only)
                                     if log_move not in st.session_state['accepted_deviations']:
                                         st.session_state['deviations'].add(log_move)
-
+                
                 # Update Metric Card
                 fitness_percent = fitness_score * 100
                 delta_color = "normal"
@@ -279,12 +279,6 @@ with col2:
                             bpmn_container.info("Not enough data to discover process structure yet.")
                 else:
                     bpmn_container.info("Waiting for first event...")
-                
-                if st.button("Clear Data & Reset"):
-                    del st.session_state['video_events']
-                    if 'simulation_active' in st.session_state:
-                        del st.session_state['simulation_active']
-                    st.rerun()
 
     else:
         st.markdown(
