@@ -237,15 +237,15 @@ class VideoProcessor:
                         )
                     
                     # Process segments with time offset adjustment
-            for segment in transcript.segments:
+                    for segment in transcript.segments:
                         # Add time offset to get actual timestamp in original video
                         start_time = segment.start + time_offset
                         
-                # Format timestamp as MM:SS
-                minutes = int(start_time // 60)
-                seconds = int(start_time % 60)
-                timestamp_str = f"{minutes:02d}:{seconds:02d}"
-                
+                        # Format timestamp as MM:SS
+                        minutes = int(start_time // 60)
+                        seconds = int(start_time % 60)
+                        timestamp_str = f"{minutes:02d}:{seconds:02d}"
+                        
                         text_content = segment.text.strip()
                         if not text_content:
                             continue
@@ -254,14 +254,14 @@ class VideoProcessor:
                         
                         # Double check to ensure we have valid text before appending
                         if full_text:
-                events.append({
-                    'timestamp': timestamp_str,
+                            events.append({
+                                'timestamp': timestamp_str,
                                 'activity_name': activity_name,
-                    'source': 'Audio',
+                                'source': 'Audio',
                                 'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
                                 'raw_seconds': start_time,
                                 'original_text': full_text
-                })
+                            })
                             
                 except Exception as e:
                     print(f"Error transcribing chunk {chunk_path}: {e}")
