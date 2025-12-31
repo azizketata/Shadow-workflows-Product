@@ -90,54 +90,188 @@ class VideoProcessor:
             print(f"Error extracting audio: {e}")
             return None
 
-    def transcribe_audio(self, audio_path):
+    def split_audio_into_chunks(self, audio_path, max_size_mb=20):
+        """
+        Split a large audio file into chunks under the specified size limit.
+        Uses moviepy which is already installed and has ffmpeg bundled.
+        
+        Args:
+            audio_path: Path to the original audio file
+            max_size_mb: Maximum size per chunk in MB (default 20MB to safely stay under Whisper's 25MB limit)
+            
+        Returns:
+            list: List of tuples (chunk_path, time_offset_seconds)
+        """
+        from moviepy import AudioFileClip
+        import logging
+        
+        # Suppress moviepy's verbose logging
+        logging.getLogger("moviepy").setLevel(logging.ERROR)
+        
+        chunks = []
+        audio_clip = None
+        
+        try:
+            # Get file size in bytes
+            file_size = os.path.getsize(audio_path)
+            max_size_bytes = max_size_mb * 1024 * 1024
+            
+            # If file is small enough, return it directly
+            if file_size <= max_size_bytes:
+                return [(audio_path, 0)]
+            
+            # Load the audio file with moviepy
+            audio_clip = AudioFileClip(audio_path)
+            total_duration_seconds = audio_clip.duration
+            
+            # Estimate how many chunks we need (add extra margin)
+            num_chunks = (file_size // max_size_bytes) + 2
+            chunk_duration_seconds = total_duration_seconds / num_chunks
+            
+            # Split into chunks
+            current_pos = 0
+            chunk_index = 0
+            
+            while current_pos < total_duration_seconds:
+                # Calculate end position
+                end_pos = min(current_pos + chunk_duration_seconds, total_duration_seconds)
+                
+                # Extract chunk using subclipped
+                chunk_audio = audio_clip.subclipped(current_pos, end_pos)
+                
+                # Save chunk to temp file
+                fd, chunk_path = tempfile.mkstemp(suffix=".mp3")
+                os.close(fd)
+                
+                # Write without progress bar (use bitrate to control size)
+                chunk_audio.write_audiofile(
+                    chunk_path, 
+                    codec='libmp3lame',
+                    bitrate='128k',
+                    logger=None
+                )
+                chunk_audio.close()
+                
+                # Store chunk info with time offset in seconds
+                chunks.append((chunk_path, current_pos))
+                
+                current_pos = end_pos
+                chunk_index += 1
+                
+            print(f"Split audio into {len(chunks)} chunks")
+            return chunks
+            
+        except Exception as e:
+            # Clean up any chunks created before the error
+            for chunk_path, _ in chunks:
+                if chunk_path != audio_path and os.path.exists(chunk_path):
+                    try:
+                        os.remove(chunk_path)
+                    except:
+                        pass
+            print(f"Error splitting audio: {e}")
+            # Fall back to original file
+            return [(audio_path, 0)]
+        finally:
+            # Always close the audio clip to release resources
+            if audio_clip is not None:
+                try:
+                    audio_clip.close()
+                except:
+                    pass
+    
+    def _cleanup_chunk_files(self, chunks, original_audio_path):
+        """
+        Safely clean up all chunk files.
+        
+        Args:
+            chunks: List of (chunk_path, offset) tuples
+            original_audio_path: Path to the original audio file (always clean this up)
+        """
+        for chunk_path, _ in chunks:
+            if chunk_path != original_audio_path and os.path.exists(chunk_path):
+                try:
+                    os.remove(chunk_path)
+                except Exception as e:
+                    print(f"Warning: Could not remove chunk file {chunk_path}: {e}")
+        
+        # Always clean up original audio file
+        if original_audio_path and os.path.exists(original_audio_path):
+            try:
+                os.remove(original_audio_path)
+            except Exception as e:
+                print(f"Warning: Could not remove audio file {original_audio_path}: {e}")
+
+    def transcribe_audio(self, audio_path, progress_callback=None):
         """
         Transcribe audio using OpenAI Whisper API.
+        Handles large files by splitting into chunks under 25MB.
         Returns a list of 'Discussion' events.
         """
         events = []
+        chunks = []
+        
         if not audio_path or not os.path.exists(audio_path):
             return events
 
         try:
-            with open(audio_path, "rb") as audio_file:
-                transcript = self.client.audio.transcriptions.create(
-                    model="whisper-1", 
-                    file=audio_file,
-                    response_format="verbose_json"
-                )
+            # Split audio into chunks if needed
+            if progress_callback:
+                progress_callback(35, "Splitting audio into chunks...")
+                
+            chunks = self.split_audio_into_chunks(audio_path)
             
-            # Process segments
-            for segment in transcript.segments:
-                start_time = segment.start
-                # Format timestamp as MM:SS
-                minutes = int(start_time // 60)
-                seconds = int(start_time % 60)
-                timestamp_str = f"{minutes:02d}:{seconds:02d}"
-                
-                text_content = segment.text.strip()
-                if not text_content:
-                    continue
+            total_chunks = len(chunks)
+            for i, (chunk_path, time_offset) in enumerate(chunks):
+                try:
+                    if progress_callback:
+                        # Calculate progress between 40% and 70% based on chunks
+                        percent = 40 + int((i / total_chunks) * 30)
+                        progress_callback(percent, f"Transcribing chunk {i+1}/{total_chunks}...")
+                        
+                    with open(chunk_path, "rb") as audio_file:
+                        transcript = self.client.audio.transcriptions.create(
+                            model="whisper-1", 
+                            file=audio_file,
+                            response_format="verbose_json"
+                        )
                     
-                activity_name, full_text = self.extract_action_object(text_content)
-                
-                # Double check to ensure we have valid text before appending
-                if full_text:
-                    events.append({
-                        'timestamp': timestamp_str,
-                        'activity_name': activity_name,
-                        'source': 'Audio',
-                        'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
-                        'raw_seconds': start_time,
-                        'original_text': full_text
-                    })
+                    # Process segments with time offset adjustment
+                    for segment in transcript.segments:
+                        # Add time offset to get actual timestamp in original video
+                        start_time = segment.start + time_offset
+                        
+                        # Format timestamp as MM:SS
+                        minutes = int(start_time // 60)
+                        seconds = int(start_time % 60)
+                        timestamp_str = f"{minutes:02d}:{seconds:02d}"
+                        
+                        text_content = segment.text.strip()
+                        if not text_content:
+                            continue
+                            
+                        activity_name, full_text = self.extract_action_object(text_content)
+                        
+                        # Double check to ensure we have valid text before appending
+                        if full_text:
+                            events.append({
+                                'timestamp': timestamp_str,
+                                'activity_name': activity_name,
+                                'source': 'Audio',
+                                'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
+                                'raw_seconds': start_time,
+                                'original_text': full_text
+                            })
+                            
+                except Exception as e:
+                    print(f"Error transcribing chunk {chunk_path}: {e}")
+                    continue
                 
         except Exception as e:
             print(f"Error transcribing audio: {e}")
         finally:
-            # Clean up audio file
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
+            # Clean up all chunk files and original audio file
+            self._cleanup_chunk_files(chunks, audio_path)
                 
         return events
 
@@ -274,21 +408,40 @@ class VideoProcessor:
         Main method to process both audio and visuals.
         Returns a Pandas DataFrame.
         """
+        # Create a progress bar
+        import streamlit as st
+        progress_bar = st.progress(0, text="Starting video analysis...")
+        
         # 1. Process Audio
+        progress_bar.progress(10, text="Extracting audio from video...")
         audio_path = self.extract_audio(video_path)
-        audio_events = self.transcribe_audio(audio_path)
+        
+        progress_bar.progress(30, text="Preparing audio for transcription...")
+        
+        # Pass a lambda to update progress
+        def update_transcription_progress(percent, text):
+            progress_bar.progress(percent, text=text)
+            
+        audio_events = self.transcribe_audio(audio_path, progress_callback=update_transcription_progress)
         
         # 2. Process Visuals
+        progress_bar.progress(70, text="Analyzing visual gestures...")
         visual_events = self.process_visuals(video_path)
         
         # 3. Fuse
+        progress_bar.progress(90, text="Fusing audio and visual events...")
         fused_list = self.fuse_events(audio_events, visual_events)
         
         if not fused_list:
+            progress_bar.empty()
             return pd.DataFrame(columns=['timestamp', 'activity_name', 'source', 'details'])
             
         df = pd.DataFrame(fused_list)
         df = df.sort_values(by='raw_seconds').drop(columns=['raw_seconds']).reset_index(drop=True)
+        
+        progress_bar.progress(100, text="Analysis complete!")
+        time.sleep(1) # Let user see completion
+        progress_bar.empty()
         
         return df
 

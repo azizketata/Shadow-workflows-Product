@@ -70,13 +70,13 @@ def generate_agenda_bpmn(agenda_text, api_key):
             bpmn_graph.add_node(task)
             
             # Add flow from previous node to current task
-            flow = BPMN.Flow(previous_node, task)
+            flow = BPMN.SequenceFlow(previous_node, task)
             bpmn_graph.add_flow(flow)
             
             previous_node = task
         
         # Connect last task to end event
-        final_flow = BPMN.Flow(previous_node, end_event)
+        final_flow = BPMN.SequenceFlow(previous_node, end_event)
         bpmn_graph.add_flow(final_flow)
 
         # layout top-to-bottom
@@ -112,19 +112,15 @@ def generate_colored_bpmn(bpmn_graph, alignments):
         alignments (list): List of alignment dictionaries from pm4py.
         
     Returns:
-        graphviz.Digraph: The colored graph.
+        tuple: (graphviz.Digraph, dict) - The colored graph and compliance info map.
     """
     from pm4py.visualization.bpmn import visualizer as bpmn_visualizer
     import graphviz
     
     if not bpmn_graph or not alignments:
-        return None
+        return None, {}
 
     # 1. Analyze Alignments to count moves
-    # Structure of alignment['alignment'] is a list of tuples: (log_move, model_move)
-    # log_move: activity name or None (>> in pm4py usually)
-    # model_move: activity name or None (>> in pm4py usually)
-    
     model_move_counts = {} # Activity -> Count of "Model Move Only" (Skipped)
     log_move_counts = {}   # Activity -> Count of "Log Move Only" (Deviation)
     sync_move_counts = {}  # Activity -> Count of "Sync" (Match)
@@ -132,11 +128,6 @@ def generate_colored_bpmn(bpmn_graph, alignments):
     for align in alignments:
         trace_alignment = align['alignment']
         for log_move, model_move in trace_alignment:
-            # Normalize None/Skipped representation
-            # PM4Py uses '>>' string often in alignment printing, but strictly (str, str) or (str, None) or (None, str) in object?
-            # Let's check typical pm4py output format. Usually it is a tuple of labels.
-            # '>>' is used for "no move".
-            
             is_log_skip = (log_move is None or log_move == '>>')
             is_model_skip = (model_move is None or model_move == '>>')
             
@@ -144,56 +135,29 @@ def generate_colored_bpmn(bpmn_graph, alignments):
                 if log_move == model_move:
                     sync_move_counts[model_move] = sync_move_counts.get(model_move, 0) + 1
             elif is_log_skip and not is_model_skip:
-                # Model Move Only -> Skipped in reality
                 model_move_counts[model_move] = model_move_counts.get(model_move, 0) + 1
             elif not is_log_skip and is_model_skip:
-                # Log Move Only -> Shadow activity
                 log_move_counts[log_move] = log_move_counts.get(log_move, 0) + 1
                 
     # 2. Generate Base Graphviz Object
-    # We use pm4py's visualizer to get the structure, then modify attributes
     parameters = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
     gviz = bpmn_visualizer.apply(bpmn_graph, parameters=parameters)
     
-    # 3. Apply Colors
-    # We need to map BPMN Node IDs (from the visualizer) to Activity Names
-    # This is tricky because visualizer creates its own IDs.
-    # However, graphviz nodes usually have 'label' attribute.
+    # 3. Build compliance info map for UI display
+    compliance_info = {}
     
-    # Parse graphviz source or modify nodes directly?
-    # graphviz.Digraph object allows iterating body? No, it's a list of strings.
-    # Better approach: Re-build or use string replacement on the source if simple,
-    # OR use pm4py's frequency decoration if possible (but we want specific colors).
-    
-    # Let's iterate through the gviz.body to find node definitions and modify styles.
-    # Typical line: 123 [label="Activity Name", shape=box, ...];
-    
+    # 4. Apply Colors and build compliance info
     new_body = []
     for line in gviz.body:
         if 'label=' in line and 'shape=' in line:
-            # It's a node
-            # Extract Label
             try:
-                # simplified parsing
                 start_quote = line.find('label="') + 7
                 end_quote = line.find('"', start_quote)
                 label = line[start_quote:end_quote]
                 
-                # Determine Color
                 fill_color = "white"
                 pen_width = "1"
                 color = "black"
-                
-                # Logic:
-                # If mostly Sync -> Green
-                # If mostly Skipped -> Grey/Dashed
-                # If mostly Log Move (This is harder because Log Moves might not correspond to Model Nodes)
-                # But wait, Log Moves (Shadow) often are NOT in the model, so we can't color a model node for them!
-                # We can only color existing nodes as "Skipped" or "Executed".
-                # Shadow activities would need NEW nodes added, which is hard with just coloring.
-                # For RQ2 visualization, coloring the model shows CONFORMANCE (what matched/skipped).
-                # Shadow activities (Log Moves) are best shown in a list or by adding dummy nodes.
-                # Let's focus on coloring the Reference Model first.
                 
                 syncs = sync_move_counts.get(label, 0)
                 skips = model_move_counts.get(label, 0)
@@ -201,22 +165,20 @@ def generate_colored_bpmn(bpmn_graph, alignments):
                 total = syncs + skips
                 if total > 0:
                     if skips > syncs:
-                        # Mostly Skipped
-                        fill_color = "#f0f0f0" # light grey
+                        fill_color = "#f0f0f0"
                         color = "grey"
                         pen_width = "2"
                         style = "dashed,filled"
+                        compliance_info[label] = "skipped"
                     else:
-                        # Mostly Executed
-                        fill_color = "#e6ffe6" # light green
+                        fill_color = "#e6ffe6"
                         color = "green"
                         pen_width = "2"
                         style = "filled"
+                        compliance_info[label] = "executed"
                 else:
-                    style = "filled" # Default
+                    style = "filled"
                     
-                # Inject style
-                # Replace the closing bracket '];' with our styles
                 line = line.rstrip(';\n')
                 line = line.rstrip(']')
                 line += f', style="{style}", fillcolor="{fill_color}", color="{color}", penwidth="{pen_width}"];'
@@ -229,11 +191,7 @@ def generate_colored_bpmn(bpmn_graph, alignments):
     gviz.body = new_body
     gviz.attr(rankdir='TB')
     
-    # NOTE: To visualize "Log Moves" (Shadow Steps) that are NOT in the model,
-    # we would ideally inject new nodes into the graph. 
-    # For MVP, we will return a separate list of "Shadow Activities" to display in UI.
-    
-    return gviz
+    return gviz, compliance_info
 
 def convert_to_event_log(df):
     """
@@ -267,23 +225,29 @@ def convert_to_event_log(df):
 def generate_discovered_bpmn(log_df):
     """
     Generates a BPMN graph from an event log using Inductive Miner.
+    Returns both the graphviz object AND an evidence map for UI rendering.
     """
     if log_df is None or log_df.empty:
-        return None
+        return None, {}
         
     try:
+        # Create a mapping of Activity -> Evidence Details from the log
+        activity_evidence_map = {}
+        if 'details' in log_df.columns and 'activity_name' in log_df.columns:
+            for _, row in log_df.iterrows():
+                source = row.get('source', 'Unknown')
+                detail = row.get('details', 'No details')
+                clean_detail = str(detail).replace('"', "'")
+                activity_evidence_map[row['activity_name']] = f"Source ({source}): {clean_detail}"
+
         # Discover BPMN model
         process_tree = pm4py.discover_process_tree_inductive(log_df)
         bpmn_model = pm4py.convert_to_bpmn(process_tree)
         
         # Visualize
-        # pm4py.view_bpmn(bpmn_model) # This opens a window, we want graphviz object
-        
-        # Streamlit doesn't support direct PM4Py BPMN object rendering easily without conversion
-        # But st.graphviz_chart takes a DOT string or source.
-        # PM4Py's visualization returns a graphviz Digraph object
         gviz = pm4py.visualization.bpmn.visualizer.apply(bpmn_model)
-        return gviz
+        
+        return gviz, activity_evidence_map
     except Exception as e:
         st.error(f"Error generating BPMN: {e}")
-        return None
+        return None, {}
