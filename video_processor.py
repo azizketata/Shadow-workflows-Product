@@ -8,21 +8,40 @@ from openai import OpenAI
 import time
 
 import spacy
+import subprocess
+import shutil
 import re
 
 class VideoProcessor:
-    def __init__(self, api_key):
+    def __init__(self, api_key, debug=False):
         """
         Initialize the VideoProcessor with OpenAI API key and MediaPipe Pose.
         """
         self.client = OpenAI(api_key=api_key)
         self.mp_pose = mp.solutions.pose
+        self.debug = debug
         self.pose = self.mp_pose.Pose(
             static_image_mode=False,
             model_complexity=1,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
+        
+        # Resolve ffmpeg binary for moviepy/imageio
+        self.ffmpeg_path = None
+        try:
+            from imageio_ffmpeg import get_ffmpeg_exe
+            self.ffmpeg_path = get_ffmpeg_exe()
+            os.environ["FFMPEG_BINARY"] = self.ffmpeg_path
+            try:
+                from moviepy.config import change_settings
+                change_settings({"FFMPEG_BINARY": self.ffmpeg_path})
+            except Exception:
+                pass
+        except Exception:
+            self.ffmpeg_path = shutil.which("ffmpeg")
+        
+        self._log(f"FFmpeg path: {self.ffmpeg_path}")
         
         # Load spaCy model
         try:
@@ -32,6 +51,10 @@ class VideoProcessor:
             import subprocess
             subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
             self.nlp = spacy.load("en_core_web_sm")
+    
+    def _log(self, message):
+        if self.debug:
+            print(f"[VideoProcessor] {message}")
             
     def extract_action_object(self, text):
         """
@@ -73,6 +96,10 @@ class VideoProcessor:
         Returns the path to the temporary audio file.
         """
         try:
+            self._log(f"Extracting audio from video: {video_path}")
+            if not os.path.exists(video_path):
+                self._log("Video path does not exist.")
+                return None
             video = VideoFileClip(video_path)
             # Create a temp file for audio
             fd, audio_path = tempfile.mkstemp(suffix=".mp3")
@@ -84,10 +111,16 @@ class VideoProcessor:
                 video.audio.write_audiofile(audio_path, logger=None)
             finally:
                 video.close()
-                
+            
+            if os.path.exists(audio_path):
+                audio_size = os.path.getsize(audio_path)
+                self._log(f"Audio extracted: {audio_path} ({audio_size} bytes)")
+            else:
+                self._log("Audio extraction failed: output file missing.")
+            
             return audio_path
         except Exception as e:
-            print(f"Error extracting audio: {e}")
+            self._log(f"Error extracting audio: {e}")
             return None
 
     def split_audio_into_chunks(self, audio_path, max_size_mb=20):
@@ -112,21 +145,29 @@ class VideoProcessor:
         audio_clip = None
         
         try:
+            if not audio_path or not os.path.exists(audio_path):
+                self._log("split_audio_into_chunks: audio path missing.")
+                return []
+
             # Get file size in bytes
             file_size = os.path.getsize(audio_path)
             max_size_bytes = max_size_mb * 1024 * 1024
+            self._log(f"Audio file size: {file_size} bytes, max per chunk: {max_size_bytes} bytes")
             
             # If file is small enough, return it directly
             if file_size <= max_size_bytes:
+                self._log("Audio file under size limit; skipping chunking.")
                 return [(audio_path, 0)]
             
             # Load the audio file with moviepy
             audio_clip = AudioFileClip(audio_path)
             total_duration_seconds = audio_clip.duration
+            self._log(f"Audio duration: {total_duration_seconds:.2f}s")
             
             # Estimate how many chunks we need (add extra margin)
             num_chunks = (file_size // max_size_bytes) + 2
             chunk_duration_seconds = total_duration_seconds / num_chunks
+            self._log(f"Chunking into ~{num_chunks} chunks, target duration: {chunk_duration_seconds:.2f}s")
             
             # Split into chunks
             current_pos = 0
@@ -136,21 +177,47 @@ class VideoProcessor:
                 # Calculate end position
                 end_pos = min(current_pos + chunk_duration_seconds, total_duration_seconds)
                 
-                # Extract chunk using subclipped
-                chunk_audio = audio_clip.subclipped(current_pos, end_pos)
-                
                 # Save chunk to temp file
                 fd, chunk_path = tempfile.mkstemp(suffix=".mp3")
                 os.close(fd)
                 
-                # Write without progress bar (use bitrate to control size)
-                chunk_audio.write_audiofile(
-                    chunk_path, 
-                    codec='libmp3lame',
-                    bitrate='128k',
-                    logger=None
-                )
-                chunk_audio.close()
+                # Prefer ffmpeg direct split for reliability
+                if not self.ffmpeg_path:
+                    self._log("FFmpeg not found; cannot split audio reliably.")
+                    break
+
+                cmd = [
+                    self.ffmpeg_path,
+                    "-y",
+                    "-ss",
+                    str(current_pos),
+                    "-t",
+                    str(end_pos - current_pos),
+                    "-i",
+                    audio_path,
+                    "-acodec",
+                    "libmp3lame",
+                    "-b:a",
+                    "128k",
+                    chunk_path
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    self._log(f"FFmpeg split failed (chunk {chunk_index}): {result.stderr.strip()}")
+                    try:
+                        os.remove(chunk_path)
+                    except Exception:
+                        pass
+                    # Continue trying next chunk
+                    current_pos = end_pos
+                    chunk_index += 1
+                    continue
+                
+                if os.path.exists(chunk_path):
+                    chunk_size = os.path.getsize(chunk_path)
+                    self._log(f"Chunk {chunk_index}: {chunk_path} ({chunk_size} bytes)")
+                else:
+                    self._log(f"Chunk {chunk_index}: file missing after write.")
                 
                 # Store chunk info with time offset in seconds
                 chunks.append((chunk_path, current_pos))
@@ -158,7 +225,7 @@ class VideoProcessor:
                 current_pos = end_pos
                 chunk_index += 1
                 
-            print(f"Split audio into {len(chunks)} chunks")
+            self._log(f"Split audio into {len(chunks)} chunks")
             return chunks
             
         except Exception as e:
@@ -169,9 +236,9 @@ class VideoProcessor:
                         os.remove(chunk_path)
                     except:
                         pass
-            print(f"Error splitting audio: {e}")
-            # Fall back to original file
-            return [(audio_path, 0)]
+            self._log(f"Error splitting audio: {e}")
+            # Return empty to avoid oversized Whisper requests
+            return []
         finally:
             # Always close the audio clip to release resources
             if audio_clip is not None:
@@ -212,6 +279,7 @@ class VideoProcessor:
         chunks = []
         
         if not audio_path or not os.path.exists(audio_path):
+            self._log("transcribe_audio: audio path missing or invalid.")
             return events
 
         try:
@@ -220,10 +288,22 @@ class VideoProcessor:
                 progress_callback(35, "Splitting audio into chunks...")
                 
             chunks = self.split_audio_into_chunks(audio_path)
+            self._log(f"Transcription chunks count: {len(chunks)}")
+            if not chunks:
+                self._log("No audio chunks available; skipping transcription.")
+                return events
             
             total_chunks = len(chunks)
             for i, (chunk_path, time_offset) in enumerate(chunks):
                 try:
+                    if not os.path.exists(chunk_path):
+                        self._log(f"Chunk missing: {chunk_path}")
+                        continue
+                    chunk_size = os.path.getsize(chunk_path)
+                    if chunk_size < 1024:
+                        self._log(f"Chunk too small, skipping: {chunk_path} ({chunk_size} bytes)")
+                        continue
+
                     if progress_callback:
                         # Calculate progress between 40% and 70% based on chunks
                         percent = 40 + int((i / total_chunks) * 30)
@@ -264,11 +344,11 @@ class VideoProcessor:
                             })
                             
                 except Exception as e:
-                    print(f"Error transcribing chunk {chunk_path}: {e}")
+                    self._log(f"Error transcribing chunk {chunk_path}: {e}")
                     continue
                 
         except Exception as e:
-            print(f"Error transcribing audio: {e}")
+            self._log(f"Error transcribing audio: {e}")
         finally:
             # Clean up all chunk files and original audio file
             self._cleanup_chunk_files(chunks, audio_path)
@@ -415,6 +495,8 @@ class VideoProcessor:
         # 1. Process Audio
         progress_bar.progress(10, text="Extracting audio from video...")
         audio_path = self.extract_audio(video_path)
+        if not audio_path:
+            self._log("Audio extraction returned None; skipping transcription.")
         
         progress_bar.progress(30, text="Preparing audio for transcription...")
         
@@ -422,11 +504,13 @@ class VideoProcessor:
         def update_transcription_progress(percent, text):
             progress_bar.progress(percent, text=text)
             
-        audio_events = self.transcribe_audio(audio_path, progress_callback=update_transcription_progress)
+        audio_events = self.transcribe_audio(audio_path, progress_callback=update_transcription_progress) if audio_path else []
+        self._log(f"Audio events count: {len(audio_events)}")
         
         # 2. Process Visuals
         progress_bar.progress(70, text="Analyzing visual gestures...")
         visual_events = self.process_visuals(video_path)
+        self._log(f"Visual events count: {len(visual_events)}")
         
         # 3. Fuse
         progress_bar.progress(90, text="Fusing audio and visual events...")

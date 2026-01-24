@@ -15,6 +15,21 @@ st.sidebar.title("Configuration")
 api_key = st.sidebar.text_input("OpenAI API Key", type="password")
 uploaded_video = st.sidebar.file_uploader("Meeting Video", type=["mp4"])
 agenda_text = st.sidebar.text_area("Meeting Agenda", height=200, help="Paste your meeting agenda here.")
+debug_enabled = st.sidebar.checkbox("Enable debug logs", value=False)
+
+if 'debug_logs' not in st.session_state:
+    st.session_state['debug_logs'] = []
+
+def log_debug(message):
+    if debug_enabled:
+        timestamp = time.strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        st.session_state['debug_logs'].append(line)
+        # Also emit to server console for easier debugging
+        print(f"[DEBUG] {line}")
+        # Prevent unbounded growth
+        if len(st.session_state['debug_logs']) > 300:
+            st.session_state['debug_logs'] = st.session_state['debug_logs'][-300:]
 
 # Governance: Detected Deviations
 st.sidebar.markdown("---")
@@ -69,7 +84,9 @@ with col1:
                             if bpmn_viz:
                                 st.session_state['agenda_activities'] = activities
                                 st.session_state['reference_bpmn'] = bpmn_obj
+                                log_debug(f"Agenda BPMN generated. Activities count: {len(activities)}")
                             else:
+                                log_debug("Agenda BPMN generation returned no graph.")
                                 st.error("Failed to generate BPMN graph.")
                         
                         if st.session_state['reference_bpmn']:
@@ -107,11 +124,17 @@ with col2:
                         tfile.close()
                         
                         # Process
-                        processor = VideoProcessor(api_key)
+                        processor = VideoProcessor(api_key, debug=debug_enabled)
                         df = processor.process_video(video_path)
                         
                         # Store in session state
                         st.session_state['video_events'] = df
+                        log_debug(f"Video processing complete. Events shape: {df.shape}")
+                        if not df.empty:
+                            log_debug(f"Event sources: {df['source'].value_counts().to_dict()}")
+                            log_debug(f"Event activities (top 10): {df['activity_name'].value_counts().head(10).to_dict()}")
+                        else:
+                            log_debug("No events detected from video processing.")
                         
                     except Exception as e:
                         st.error(f"Error during processing: {e}")
@@ -179,6 +202,7 @@ with col2:
                 current_events = df_events[
                     df_events['timestamp'].apply(time_str_to_seconds) <= current_video_time
                 ]
+                log_debug(f"Slider time: {selected_time_str} ({current_video_time}s). Current events count: {len(current_events)}")
                 
                 # --- PHASE 4: COMPLIANCE CHECK ---
                 fitness_score = 0.0
@@ -191,9 +215,14 @@ with col2:
                         current_events, 
                         st.session_state['agenda_activities']
                     )
+                    if not mapped_events.empty:
+                        log_debug(f"Mapped events count: {len(mapped_events)}")
+                        if 'mapped_activity' in mapped_events.columns:
+                            log_debug(f"Mapped activities (top 10): {mapped_events['mapped_activity'].value_counts().head(10).to_dict()}")
                     
                     # Convert to log for fitness calculation
                     log_data_for_fitness = convert_to_event_log(mapped_events)
+                    log_debug(f"Log for fitness is {'None' if log_data_for_fitness is None else 'available'}")
                     
                     # Calculate Fitness & Alignments
                     if log_data_for_fitness is not None:
@@ -204,6 +233,7 @@ with col2:
                         fitness_score = compliance_result.get('score', 0.0)
                         alignments = compliance_result.get('alignments', [])
                         st.session_state['last_alignments'] = alignments
+                        log_debug(f"Compliance fitness: {fitness_score:.4f}, alignments: {len(alignments)}")
                         
                         # Analyze Alignments for Governance
                         for align in alignments:
@@ -212,6 +242,7 @@ with col2:
                                     # Shadow activity (Log Move Only)
                                     if log_move not in st.session_state['accepted_deviations']:
                                         st.session_state['deviations'].add(log_move)
+                        log_debug(f"Detected deviations: {len(st.session_state['deviations'])}")
                 
                 # Update Metric Card
                 fitness_percent = fitness_score * 100
@@ -259,6 +290,8 @@ with col2:
                      colored_viz, _ = generate_colored_bpmn(st.session_state['reference_bpmn'], alignments)
                      # The bottom logic for Col1 will pick up 'last_alignments' on rerun
                      pass 
+                else:
+                    log_debug(f"Overlay state -> show_overlay={show_overlay}, reference_bpmn={bool(st.session_state.get('reference_bpmn'))}, alignments={len(alignments)}")
 
                 if not mapped_events.empty:
                     log_data = convert_to_event_log(mapped_events)
@@ -269,12 +302,15 @@ with col2:
                             
                             # Display Evidence Panel - Click to see why each process was added
                             if evidence_map:
+                                log_debug(f"Evidence map size: {len(evidence_map)}")
                                 with st.expander("📋 **Click to see Evidence: Why was each process added?**", expanded=False):
                                     st.markdown("**Select an activity to see the justification:**")
                                     for activity_name, evidence in evidence_map.items():
                                         st.markdown(f"**🔹 {activity_name}**")
                                         st.info(f"_{evidence}_")
                                         st.markdown("---")
+                            else:
+                                log_debug("Evidence map is empty.")
                         else:
                             bpmn_container.info("Not enough data to discover process structure yet.")
                 else:
@@ -359,3 +395,11 @@ if st.session_state['accepted_deviations']:
     st.sidebar.success("Accepted Variants:")
     for dev in st.session_state['accepted_deviations']:
         st.sidebar.write(f"- {dev}")
+
+# Debug log output
+if debug_enabled:
+    with st.sidebar.expander("Debug logs", expanded=False):
+        if st.session_state['debug_logs']:
+            st.code("\n".join(st.session_state['debug_logs']))
+        else:
+            st.write("No debug logs yet.")
