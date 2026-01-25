@@ -2,6 +2,7 @@ import streamlit as st
 import tempfile
 import os
 import pandas as pd
+import pm4py
 import time
 from bpmn_gen import generate_agenda_bpmn, convert_to_event_log, generate_discovered_bpmn, generate_colored_bpmn
 from video_processor import VideoProcessor
@@ -16,6 +17,23 @@ api_key = st.sidebar.text_input("OpenAI API Key", type="password")
 uploaded_video = st.sidebar.file_uploader("Meeting Video", type=["mp4"])
 agenda_text = st.sidebar.text_area("Meeting Agenda", height=200, help="Paste your meeting agenda here.")
 debug_enabled = st.sidebar.checkbox("Enable debug logs", value=False)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Semantic Abstraction Layer")
+st.sidebar.caption("Pre-mining abstraction is always enabled.")
+enable_abstraction = True
+abstraction_model = st.sidebar.text_input("Ollama model", value="mistral")
+openai_abstraction_model = st.sidebar.text_input("OpenAI fallback model", value="gpt-4o-mini")
+openai_timeout = st.sidebar.number_input("OpenAI timeout (seconds)", min_value=20, max_value=180, value=60, step=10)
+window_seconds = st.sidebar.number_input("Window size (seconds)", min_value=10, max_value=300, value=60, step=10)
+overlap_ratio = st.sidebar.slider("Window overlap ratio", min_value=0.0, max_value=0.9, value=0.5, step=0.1)
+min_events_per_window = st.sidebar.number_input("Min events per window", min_value=1, max_value=50, value=5, step=1)
+min_label_support = st.sidebar.number_input("Min label support", min_value=1, max_value=20, value=2, step=1)
+shadow_min_ratio = st.sidebar.slider("Shadow min ratio (across meetings)", min_value=0.0, max_value=1.0, value=0.15, step=0.05)
+max_windows_per_run = st.sidebar.number_input("Max windows per run", min_value=10, max_value=300, value=100, step=10)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Export Abstracted Log")
 
 if 'debug_logs' not in st.session_state:
     st.session_state['debug_logs'] = []
@@ -204,15 +222,52 @@ with col2:
                 ]
                 log_debug(f"Slider time: {selected_time_str} ({current_video_time}s). Current events count: {len(current_events)}")
                 
+                # --- PHASE 3.5: SEMANTIC ABSTRACTION (Optional) ---
+                abstracted_events = current_events
+                if enable_abstraction and not current_events.empty and st.session_state['agenda_activities']:
+                    try:
+                        abstracted_events = compliance_engine.abstract_events_df(
+                            df=current_events,
+                            agenda_tasks=st.session_state['agenda_activities'],
+                            window_seconds=window_seconds,
+                            shadow_min_ratio=shadow_min_ratio,
+                            model=abstraction_model,
+                            overlap_ratio=overlap_ratio,
+                            min_events_per_window=min_events_per_window,
+                            min_label_support=min_label_support,
+                            api_key=api_key,
+                            openai_model=openai_abstraction_model,
+                            openai_timeout=openai_timeout,
+                            max_windows_per_run=max_windows_per_run,
+                            cache=st.session_state.setdefault("abstraction_cache", {}),
+                            debug_callback=log_debug,
+                        )
+                        st.session_state['abstracted_events'] = abstracted_events
+                        log_debug(f"Abstracted events count: {len(abstracted_events)}")
+                        if not abstracted_events.empty:
+                            log_debug(f"Abstracted activities (top 10): {abstracted_events['activity_name'].value_counts().head(10).to_dict()}")
+                    except Exception as e:
+                        log_debug(f"Abstraction error: {e}")
+                        st.warning(f"Abstraction failed; using raw events. {e}")
+                        abstracted_events = current_events
+                else:
+                    if not enable_abstraction:
+                        log_debug("Abstraction disabled; using raw events.")
+                    elif current_events.empty:
+                        log_debug("Abstraction skipped: no current events.")
+                    elif not st.session_state['agenda_activities']:
+                        log_debug("Abstraction skipped: agenda activities not available.")
+                    st.session_state['abstracted_events'] = abstracted_events
+
                 # --- PHASE 4: COMPLIANCE CHECK ---
                 fitness_score = 0.0
                 alignments = []
-                mapped_events = current_events
+                mapped_events = abstracted_events
                 
-                if not current_events.empty and st.session_state['reference_bpmn'] and st.session_state['agenda_activities']:
+                if not abstracted_events.empty and st.session_state['reference_bpmn'] and st.session_state['agenda_activities']:
                     # Map events
                     mapped_events = compliance_engine.map_events_to_agenda(
-                        current_events, 
+                        abstracted_events, 
                         st.session_state['agenda_activities']
                     )
                     if not mapped_events.empty:
@@ -395,6 +450,41 @@ if st.session_state['accepted_deviations']:
     st.sidebar.success("Accepted Variants:")
     for dev in st.session_state['accepted_deviations']:
         st.sidebar.write(f"- {dev}")
+
+# Export Abstracted Log (CSV/XES)
+abstracted_for_export = st.session_state.get("abstracted_events")
+if abstracted_for_export is not None and not abstracted_for_export.empty:
+    csv_bytes = abstracted_for_export.to_csv(index=False).encode("utf-8")
+    st.sidebar.download_button(
+        "Download Abstracted CSV",
+        data=csv_bytes,
+        file_name="abstracted_log.csv",
+        mime="text/csv",
+    )
+
+    temp_xes = None
+    try:
+        temp_xes = tempfile.NamedTemporaryFile(delete=False, suffix=".xes")
+        temp_xes.close()
+        log_df = convert_to_event_log(abstracted_for_export)
+        if log_df is not None:
+            pm4py.write_xes(log_df, temp_xes.name)
+            with open(temp_xes.name, "rb") as f:
+                xes_bytes = f.read()
+            st.sidebar.download_button(
+                "Download Abstracted XES",
+                data=xes_bytes,
+                file_name="abstracted_log.xes",
+                mime="application/xml",
+            )
+    except Exception as e:
+        st.sidebar.warning(f"XES export failed: {e}")
+    finally:
+        if temp_xes is not None and os.path.exists(temp_xes.name):
+            try:
+                os.unlink(temp_xes.name)
+            except Exception:
+                pass
 
 # Debug log output
 if debug_enabled:

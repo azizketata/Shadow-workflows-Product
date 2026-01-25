@@ -210,11 +210,16 @@ def convert_to_event_log(df):
     # Map columns to PM4Py standard names
     log_df['concept:name'] = log_df['activity_name']
     
-    # Convert timestamp string (MM:SS) to datetime objects for PM4Py
+    # Convert timestamp string (MM:SS or HH:MM:SS) to datetime objects for PM4Py
     # We use a dummy date for reference
     def parse_time(t_str):
         try:
-            return datetime.strptime(f"2023-01-01 00:{t_str}", "%Y-%m-%d %H:%M:%S")
+            parts = str(t_str).split(":")
+            if len(parts) == 2:
+                return datetime.strptime(f"2023-01-01 00:{t_str}", "%Y-%m-%d %H:%M:%S")
+            if len(parts) == 3:
+                return datetime.strptime(f"2023-01-01 {t_str}", "%Y-%m-%d %H:%M:%S")
+            return datetime.now()
         except:
             return datetime.now()
             
