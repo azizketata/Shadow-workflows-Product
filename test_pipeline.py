@@ -233,9 +233,11 @@ def run_pipeline(args):
         _matched = df_mapped[~df_mapped.get("mapped_activity", df_mapped.get("activity_name", pd.Series())).str.startswith("Deviation:", na=False)].copy()
         _act_col = "mapped_activity" if "mapped_activity" in _matched.columns else "activity_name"
         if not _matched.empty:
-            _first = _matched.groupby(_act_col).first().reset_index()
-            _first["__ts"] = _first["timestamp"].apply(
+            # Sort by timestamp BEFORE groupby to ensure first() picks chronologically earliest
+            _matched["__ts"] = _matched["timestamp"].apply(
                 lambda t: sum(int(x)*m for x, m in zip(str(t).split(":"), [3600,60,1])))
+            _matched = _matched.sort_values("__ts")
+            _first = _matched.groupby(_act_col).first().reset_index()
             _first = _first.sort_values("__ts").drop(columns=["__ts"])
             _first["activity_name"] = _first[_act_col]
             _log_dedup = convert_to_event_log(_first)

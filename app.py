@@ -345,66 +345,8 @@ with st.sidebar:
     # ── Debug ──────────────────────────────────────────────────────────────────
     debug_enabled = st.checkbox("Enable debug logs", value=False)
 
-    # ── Export ─────────────────────────────────────────────────────────────────
-    st.markdown("**Export**")
-    abstracted_for_export = st.session_state.get("abstracted_events")
-    if abstracted_for_export is not None and not isinstance(abstracted_for_export, type(None)):
-        if hasattr(abstracted_for_export, "empty") and not abstracted_for_export.empty:
-            csv_bytes = abstracted_for_export.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Download Abstracted CSV",
-                data=csv_bytes,
-                file_name="abstracted_log.csv",
-                mime="text/csv",
-            )
-            temp_xes = None
-            try:
-                temp_xes = tempfile.NamedTemporaryFile(delete=False, suffix=".xes")
-                temp_xes.close()
-                log_df = convert_to_event_log(abstracted_for_export)
-                if log_df is not None:
-                    pm4py.write_xes(log_df, temp_xes.name)
-                    with open(temp_xes.name, "rb") as f:
-                        xes_bytes = f.read()
-                    st.download_button(
-                        "Download Abstracted XES",
-                        data=xes_bytes,
-                        file_name="abstracted_log.xes",
-                        mime="application/xml",
-                    )
-            except Exception as e:
-                st.warning(f"XES export failed: {e}")
-            finally:
-                if temp_xes is not None and os.path.exists(temp_xes.name):
-                    try:
-                        os.unlink(temp_xes.name)
-                    except Exception:
-                        pass
-        else:
-            st.caption("Process a video to enable exports.")
-    else:
-        st.caption("Process a video to enable exports.")
-
-    st.divider()
-
-    # ── Governance ─────────────────────────────────────────────────────────────
-    st.markdown("**Governance: Shadow Activities**")
-    if st.session_state["deviations"]:
-        st.warning(f"{len(st.session_state['deviations'])} shadow activities detected")
-        for dev in list(st.session_state["deviations"]):
-            c1, c2 = st.columns([4, 1])
-            c1.markdown(f'<div class="gov-card">{dev}</div>', unsafe_allow_html=True)
-            if c2.button("Accept", key=f"acc_{dev}", help="Accept as formal variant"):
-                st.session_state["accepted_deviations"].add(dev)
-                st.session_state["deviations"].discard(dev)
-                st.rerun()
-    else:
-        st.caption("No shadow activities detected yet.")
-
-    if st.session_state["accepted_deviations"]:
-        st.success("Accepted Variants")
-        for dev in st.session_state["accepted_deviations"]:
-            st.markdown(f'<div class="gov-accepted">{dev}</div>', unsafe_allow_html=True)
+    # NOTE: Export and Governance sections are rendered at the end of the script
+    # (after main-content processing) so they can see updated session state.
 
     # ── Debug Log Output ───────────────────────────────────────────────────────
     if debug_enabled:
@@ -593,6 +535,8 @@ def render_reference_bpmn():
                                 st.success(f"**{act}** — matched")
                             elif status == "skipped":
                                 st.warning(f"**{act}** — not detected")
+                            elif status == "deviation":
+                                st.error(f"**{act}** — shadow workflow (deviation)")
                             else:
                                 st.info(f"**{act}** — {status}")
             else:
@@ -659,11 +603,16 @@ with col2:
                         tfile.close()
 
                         processor = VideoProcessor(api_key or "local", debug=debug_enabled)
+                        progress_bar = st.progress(0, text="Starting video analysis...")
+                        def _st_progress(percent, text=""):
+                            progress_bar.progress(min(percent, 100), text=text)
                         df = processor.process_video(
                             video_path,
                             use_local_whisper=use_local_whisper,
                             local_whisper_model=local_whisper_model,
+                            progress_callback=_st_progress,
                         )
+                        progress_bar.empty()
                         st.session_state["video_events"] = df
                         log_debug(f"Video processing complete — {df.shape[0]} events")
                     except Exception as e:
@@ -777,8 +726,10 @@ with col2:
                                 ~mapped_events[_act_col].str.startswith("Deviation:", na=False)
                             ].copy()
                             if not _formal.empty:
+                                # Sort by timestamp BEFORE groupby to ensure first() picks chronologically earliest
+                                _formal["__ts"] = _formal["timestamp"].apply(_ts_to_sec)
+                                _formal = _formal.sort_values("__ts")
                                 _first = _formal.groupby(_act_col).first().reset_index()
-                                _first["__ts"] = _first["timestamp"].apply(_ts_to_sec)
                                 _first = _first.sort_values("__ts").drop(columns=["__ts"])
                                 _first["activity_name"] = _first[_act_col]
                                 _dedup_log = convert_to_event_log(_first)
@@ -795,7 +746,7 @@ with col2:
                         # Detect shadow activities for governance
                         for align in alignments:
                             for log_move, model_move in align["alignment"]:
-                                if (model_move is None or model_move == ">>") and log_move is not None:
+                                if (model_move is None or model_move == ">>") and log_move is not None and log_move != ">>":
                                     if log_move not in st.session_state["accepted_deviations"]:
                                         st.session_state["deviations"].add(log_move)
 
@@ -881,3 +832,68 @@ with col2:
 """,
             unsafe_allow_html=True,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDEBAR — DYNAMIC SECTIONS (rendered after main-content processing)
+# ══════════════════════════════════════════════════════════════════════════════
+with st.sidebar:
+    st.divider()
+
+    # ── Export ─────────────────────────────────────────────────────────────────
+    st.markdown("**Export**")
+    abstracted_for_export = st.session_state.get("abstracted_events")
+    if abstracted_for_export is not None and hasattr(abstracted_for_export, "empty") and not abstracted_for_export.empty:
+        csv_bytes = abstracted_for_export.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download Abstracted CSV",
+            data=csv_bytes,
+            file_name="abstracted_log.csv",
+            mime="text/csv",
+        )
+        temp_xes = None
+        try:
+            temp_xes = tempfile.NamedTemporaryFile(delete=False, suffix=".xes")
+            temp_xes.close()
+            log_df = convert_to_event_log(abstracted_for_export)
+            if log_df is not None:
+                pm4py.write_xes(log_df, temp_xes.name)
+                with open(temp_xes.name, "rb") as f:
+                    xes_bytes = f.read()
+                st.download_button(
+                    "Download Abstracted XES",
+                    data=xes_bytes,
+                    file_name="abstracted_log.xes",
+                    mime="application/xml",
+                )
+        except Exception as e:
+            st.warning(f"XES export failed: {e}")
+        finally:
+            if temp_xes is not None and os.path.exists(temp_xes.name):
+                try:
+                    os.unlink(temp_xes.name)
+                except Exception:
+                    pass
+    else:
+        st.caption("Process a video to enable exports.")
+
+    st.divider()
+
+    # ── Governance ─────────────────────────────────────────────────────────────
+    st.markdown("**Governance: Shadow Activities**")
+    if st.session_state["deviations"]:
+        st.warning(f"{len(st.session_state['deviations'])} shadow activities detected")
+        for dev in list(st.session_state["deviations"]):
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f'<div class="gov-card">{dev}</div>', unsafe_allow_html=True)
+            if c2.button("Accept", key=f"acc_{dev}", help="Accept as formal variant"):
+                st.session_state["accepted_deviations"].add(dev)
+                st.session_state["deviations"].discard(dev)
+                st.rerun()
+    else:
+        st.caption("No shadow activities detected yet.")
+
+    if st.session_state["accepted_deviations"]:
+        st.success("Accepted Variants")
+        for dev in st.session_state["accepted_deviations"]:
+            st.markdown(f'<div class="gov-accepted">{dev}</div>', unsafe_allow_html=True)

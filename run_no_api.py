@@ -99,69 +99,10 @@ def build_sequential_bpmn(activities: list) -> BPMN:
 
 
 # ---------------------------------------------------------------------------
-# Step 3a: Rule-based keyword mapping for clear-cut council events
+# Step 3a: Rule-based keyword mapping (imported from shared module)
 # ---------------------------------------------------------------------------
 
-# Maps NLP activity_name labels + text keywords to agenda item substrings.
-# Checked BEFORE SBERT — only fires when high-confidence.
-_KEYWORD_RULES = [
-    # (activity_name_keywords, text_keywords, agenda_substring_match)
-    ({"Call to Order", "Call Order"},       ["come to order", "call to order", "meeting.*order"],         "Call to Order"),
-    ({"Call Roll", "Roll Call"},             ["roll call", "council members present", "please call roll"],  "Roll Call"),
-    ({"Pledge"},                             ["pledge of allegiance"],                                       "Pledge of Allegiance"),
-    ({"Approve Agenda", "Approval Agenda"},  ["approval of.*agenda", "approve.*agenda", "adopt.*agenda"],   "Approval of Agenda"),
-    ({"Approve Minutes"},                    ["approval of.*minutes", "approve.*minutes", "previous meeting"], "Approval of Minutes"),
-    ({"Public Comment"},                     ["public comment", "members of the public", "public.*testimony", "open.*public comment"], "Public Comment (General)"),
-    ({"Consent Agenda"},                     ["consent agenda", "consent calendar"],                         "Consent Agenda"),
-    ({"Staff Report", "Staff Reports"},      ["staff report", "city manager report", "department update", "presentation"], "Staff Reports and Presentations"),
-    ({"City Manager"},                       ["city manager"],                                               "City Manager Report"),
-    ({"Finance", "Budget"},                  ["finance department", "finance update", "budget update"],      "Finance Department Update"),
-    ({"Public Hearing", "Open Hearing"},     ["open.*public hearing", "public hearing.*open"],               "Open Public Hearing"),
-    ({"Close Hearing"},                      ["close.*public hearing", "public hearing.*close"],             "Close Public Hearing"),
-    ({"Old Business"},                       ["old business", "pending.*ordinance"],                         "Old Business"),
-    ({"Discuss Ordinance", "Review Ordinance"}, ["ordinance.*review", "review.*ordinance", "pending ordinance"], "Review Pending Ordinances"),
-    ({"Budget Amendment", "Discuss Budget"}, ["budget amendment", "budget discussion"],                      "Budget Amendments Discussion"),
-    ({"New Business"},                       ["new business"],                                               "New Business"),
-    ({"Propose Motion", "Introduce Motion"}, ["introduce.*ordinance", "new ordinance", "ordinance.*introduce"], "Introduce New Ordinance"),
-    ({"Resolution"},                         ["capital improvement", "resolution.*capital"],                 "Resolution for Capital Improvements"),
-    ({"Contract"},                           ["contract approval", "approve.*contract"],                     "Contract Approval"),
-    ({"Council Member Report", "Council Reports"}, ["council member report", "council.*report"],             "Council Member Reports"),
-    ({"City Attorney"},                      ["city attorney", "attorney report"],                           "City Attorney Report"),
-    ({"Scheduling", "Announcements"},        ["scheduling", "announcement", "next meeting"],                 "Scheduling and Announcements"),
-    ({"Adjourn", "Adjourned"},               ["adjourn", "meeting.*adjourn", "stand.*recess"],               "Adjourn Meeting"),
-    ({"Call for Vote", "Propose Motion"},    ["all in favor", "motion carries", "ayes have it", "call.*vote", "move to approve", "second.*motion"], "Approve Consent Agenda Items"),
-]
-
-
-def _keyword_map(row, activities: list) -> str | None:
-    """Try to map a row to an agenda item via keyword rules. Returns activity label or None."""
-    act_name = str(row.get("activity_name", "")).strip()
-    details  = str(row.get("details", "")).lower()
-    orig_txt = str(row.get("original_text", "")).lower()
-    combined_text = (details + " " + orig_txt)[:500]
-
-    for act_keywords, text_patterns, agenda_substr in _KEYWORD_RULES:
-        # Check NLP activity label
-        if act_name in act_keywords:
-            # Verify with text if text patterns given
-            if not text_patterns or any(re.search(p, combined_text) for p in text_patterns):
-                match = _find_activity(activities, agenda_substr)
-                if match:
-                    return match
-        # Check text patterns even if activity_name didn't match
-        if text_patterns and any(re.search(p, combined_text) for p in text_patterns):
-            match = _find_activity(activities, agenda_substr)
-            if match:
-                return match
-    return None
-
-
-def _find_activity(activities: list, substr: str) -> str | None:
-    """Find the first activity label containing the given substring."""
-    for a in activities:
-        if substr.lower() in a.lower():
-            return a
-    return None
+from keyword_rules import KEYWORD_RULES, keyword_map, find_activity
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +146,7 @@ def map_events_sbert(df: pd.DataFrame, activities: list, model: SentenceTransfor
 
     for i, row in enumerate(rows_list):
         # 1. Try keyword rules first
-        keyword_match = _keyword_map(row, activities) if use_keywords else None
+        keyword_match = keyword_map(row, activities) if use_keywords else None
         if keyword_match:
             mapped_activities.append(keyword_match)
             mapped_scores.append(1.0)
@@ -246,14 +187,12 @@ def dedup_for_fitness(df_mapped: pd.DataFrame, activities: list) -> pd.DataFrame
     matched = df_mapped[~df_mapped["mapped_activity"].str.startswith("Deviation:", na=False)].copy()
     if matched.empty:
         return matched
-    # Keep first occurrence of each activity
-    first_occurrences = matched.groupby("mapped_activity").first().reset_index()
-    # Re-sort by original timestamp ordering
-    first_occurrences = first_occurrences.sort_values("mapped_activity").drop_duplicates("mapped_activity")
-    # Restore time order using the timestamp column
-    first_occurrences["__sort_ts"] = first_occurrences["timestamp"].apply(
+    # Sort by timestamp BEFORE groupby to ensure first() picks chronologically earliest
+    matched["__sort_ts"] = matched["timestamp"].apply(
         lambda t: sum(int(x) * m for x, m in zip(str(t).split(":"), [3600, 60, 1]))
     )
+    matched = matched.sort_values("__sort_ts")
+    first_occurrences = matched.groupby("mapped_activity").first().reset_index()
     first_occurrences = first_occurrences.sort_values("__sort_ts").drop(columns=["__sort_ts"])
     return first_occurrences
 

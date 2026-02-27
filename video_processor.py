@@ -26,7 +26,8 @@ class VideoProcessor:
         Initialize the VideoProcessor with OpenAI API key and visual detection backends.
         Uses rtmlib (RTMPose) for pose estimation and OpenCV MOG2 for motion detection.
         """
-        self.client = OpenAI(api_key=api_key)
+        self._api_key = api_key
+        self._client = None  # Lazy-init: only created when API transcription is used
         self.debug = debug
 
         # --- Pose detection via rtmlib (replaces MediaPipe) ---
@@ -49,6 +50,7 @@ class VideoProcessor:
         self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
             history=500, varThreshold=50, detectShadows=False,
         )
+        self._morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         
         # Resolve ffmpeg binary for moviepy/imageio
         self.ffmpeg_path = None
@@ -75,6 +77,13 @@ class VideoProcessor:
             subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
             self.nlp = spacy.load("en_core_web_sm")
     
+    @property
+    def client(self):
+        """Lazy-initialize OpenAI client only when needed (e.g., API transcription)."""
+        if self._client is None:
+            self._client = OpenAI(api_key=self._api_key)
+        return self._client
+
     def _log(self, message):
         if self.debug:
             print(f"[VideoProcessor] {message}")
@@ -86,6 +95,53 @@ class VideoProcessor:
         s = int(total_seconds % 60)
         return f"{h:02d}:{m:02d}:{s:02d}"
             
+    def _filter_no_speech_segments(self, segments, threshold=0.6):
+        """Filter out segments where Whisper's no_speech_prob exceeds threshold."""
+        filtered = []
+        skipped = 0
+        for seg in segments:
+            no_speech = seg.get("no_speech_prob", 0.0)
+            if no_speech > threshold:
+                skipped += 1
+                continue
+            filtered.append(seg)
+        if skipped > 0:
+            self._log(f"VAD filter: removed {skipped} silent/noise segments (no_speech_prob > {threshold})")
+        return filtered
+
+    def _match_phrase(self, text_lower, patterns):
+        """Check if any of the given regex patterns match in text (word-boundary aware)."""
+        for pattern in patterns:
+            if re.search(pattern, text_lower):
+                return True
+        return False
+
+    def _extract_topic(self, doc, text):
+        """Extract a topic phrase from spaCy doc for enriched 'Discussion: [topic]' labels."""
+        # Try noun chunks first
+        chunks = list(doc.noun_chunks)
+        if chunks:
+            meaningful = [
+                chunk.text for chunk in chunks
+                if chunk.root.pos_ != "PRON" and len(chunk.text) > 2
+            ]
+            if meaningful:
+                topic = meaningful[0]
+                words = topic.split()
+                if len(words) > 5:
+                    topic = " ".join(words[:5])
+                return topic.strip()
+
+        # Fallback: first 4 significant words (nouns/adjectives/proper nouns)
+        significant = [
+            token.text for token in doc
+            if token.pos_ in ("NOUN", "PROPN", "ADJ") and not token.is_stop
+        ]
+        if significant:
+            return " ".join(significant[:4])
+
+        return None
+
     def extract_action_object(self, text):
         """
         Extract potential activities using NLP (Verb + Object).
@@ -93,79 +149,105 @@ class VideoProcessor:
         """
         if not text:
             return None, None
-            
+
         try:
             doc = self.nlp(text)
         except Exception:
             return "Discussion", text
-        
+
         # 1. Keyword Mapping (Heuristics for council meeting terms)
         text_lower = text.lower()
-        # Motions
-        # Vote Results — must come BEFORE generic "motion" check to avoid false match
-        if "the ayes have it" in text_lower or "motion carries" in text_lower or "motion passes" in text_lower:
+
+        # Vote Results — must come BEFORE generic "motion" check
+        if self._match_phrase(text_lower, [r'\bthe ayes have it\b', r'\bmotion carries\b', r'\bmotion passes\b']):
             return "Vote Result", text
-        if "motion failed" in text_lower or "motion fails" in text_lower:
+        if self._match_phrase(text_lower, [r'\bmotion failed\b', r'\bmotion fails\b']):
             return "Vote Result", text
-        # Seconds — check before generic "motion" to avoid "second the motion" → Propose Motion
-        if "i second" in text_lower or "seconded" in text_lower:
+
+        # Seconds — require deliberate phrasing (avoids "second item" false positive)
+        if self._match_phrase(text_lower, [r'\bi second\b', r'\bseconded\b', r'\bsecond the\b', r'\bsecond that\b']):
             return "Second Motion", text
-        if "second" in text_lower and ("motion" in text_lower or "that" in text_lower):
-            return "Second Motion", text
-        # Motions
-        if "i move" in text_lower or "make a motion" in text_lower or "so moved" in text_lower:
+
+        # Motions — require deliberate phrasing (avoids "move on" false positive)
+        if self._match_phrase(text_lower, [
+            r'\bi move\b', r'\bmake a motion\b', r'\bso moved\b',
+            r'\bmotion to\b', r'\bmove to approve\b', r'\bmove to adopt\b'
+        ]):
             return "Propose Motion", text
-        if "motion" in text_lower and ("introduce" in text_lower or "present" in text_lower):
+        # Generic "motion" only as standalone noun (not "move on", "move forward")
+        if self._match_phrase(text_lower, [r'\bmotion\b']) and not self._match_phrase(text_lower, [
+            r'\bmove on\b', r'\bmove forward\b', r'\bmoving on\b'
+        ]):
             return "Propose Motion", text
-        if ("motion" in text_lower or "move" in text_lower) and "second" not in text_lower:
-            return "Propose Motion", text
+
         # Voting
-        if "all in favor" in text_lower or "those in favor" in text_lower:
+        if self._match_phrase(text_lower, [r'\ball in favor\b', r'\bthose in favor\b']):
             return "Call for Vote", text
-        if "opposed" in text_lower or "nay" in text_lower or "nays" in text_lower:
+        if self._match_phrase(text_lower, [r'\bopposed\b', r'\bnays?\b']):
             return "Call for Vote", text
-        if "roll call" in text_lower:
+        if self._match_phrase(text_lower, [r'\broll call\b']):
             return "Roll Call Vote", text
-        if "vote" in text_lower:
+        if self._match_phrase(text_lower, [r'\bvote\b']):
             return "Call for Vote", text
+
         # Adjournment / Recess
-        if "adjourn" in text_lower:
+        if self._match_phrase(text_lower, [r'\badjourn']):
             return "Adjourn Meeting", text
-        if "recess" in text_lower:
+        if self._match_phrase(text_lower, [r'\brecess\b']):
             return "Recess", text
+
         # Public Comment
-        if "public comment" in text_lower or "public hearing" in text_lower:
+        if self._match_phrase(text_lower, [r'\bpublic comment\b', r'\bpublic hearing\b']):
             return "Public Comment", text
-        if "open the floor" in text_lower or "floor is open" in text_lower:
+        if self._match_phrase(text_lower, [r'\bopen the floor\b', r'\bfloor is open\b']):
             return "Open Public Comment", text
-        if "close the" in text_lower and ("comment" in text_lower or "hearing" in text_lower):
+        if "close the" in text_lower and self._match_phrase(text_lower, [r'\bcomment\b', r'\bhearing\b']):
             return "Close Public Comment", text
+
         # Agenda items
-        if "agenda item" in text_lower or "next item" in text_lower or "item number" in text_lower:
+        if self._match_phrase(text_lower, [r'\bagenda item\b', r'\bnext item\b', r'\bitem number\b']):
             return "Introduce Agenda Item", text
-        if "ordinance" in text_lower:
+        if self._match_phrase(text_lower, [r'\bordinance\b']):
             return "Discuss Ordinance", text
-        if "resolution" in text_lower:
+        if self._match_phrase(text_lower, [r'\bresolution\b']):
             return "Discuss Resolution", text
-        if "approval" in text_lower or "approve" in text_lower:
+        if self._match_phrase(text_lower, [r'\bapproval\b', r'\bapprove\b']):
             return "Request Approval", text
+
         # Presentations / Reports
-        if "present" in text_lower and ("report" in text_lower or "update" in text_lower):
+        if self._match_phrase(text_lower, [r'\bpresent\b']) and self._match_phrase(text_lower, [r'\breport\b', r'\bupdate\b']):
             return "Staff Presentation", text
-        if "staff report" in text_lower:
+        if self._match_phrase(text_lower, [r'\bstaff report\b']):
             return "Staff Report", text
-        if "budget" in text_lower:
+        if self._match_phrase(text_lower, [r'\bbudget\b']):
             return "Budget Discussion", text
-            
-        # 2. General NLP Extraction (Verb + Object)
+
+        # 2. General NLP Extraction (Verb + Object with prepositional objects)
         for token in doc:
-            if token.pos_ == "VERB":
-                # Find direct object
+            if token.dep_ == "ROOT" and token.pos_ == "VERB":
+                dobj = None
+                pobj = None
                 for child in token.children:
                     if child.dep_ == "dobj":
-                        return f"{token.lemma_.capitalize()} {child.text.capitalize()}", text
-                        
-        return "Discussion", text # Default fallback
+                        dobj = " ".join([t.text for t in child.subtree])
+                    elif child.dep_ == "prep":
+                        for grandchild in child.children:
+                            if grandchild.dep_ == "pobj":
+                                pobj = f"{child.text} {' '.join(t.text for t in grandchild.subtree)}"
+                                break
+                if dobj:
+                    label = f"{token.lemma_.capitalize()} {dobj.capitalize()}"
+                    if pobj:
+                        label += f" {pobj}"
+                    return label, text
+                elif pobj:
+                    return f"{token.lemma_.capitalize()} {pobj.capitalize()}", text
+
+        # 3. Topic-enriched fallback (instead of generic "Discussion")
+        topic = self._extract_topic(doc, text)
+        if topic:
+            return f"Discussion: {topic}", text
+        return "Discussion", text
 
     def extract_audio(self, video_path):
         """
@@ -400,10 +482,13 @@ class VideoProcessor:
                 audio_path,
                 verbose=False,
                 initial_prompt=COUNCIL_PROMPT,
-                word_timestamps=False,
+                language="en",
+                word_timestamps=True,
             )
             segments = result.get("segments", [])
-            self._log(f"Local Whisper produced {len(segments)} segments")
+            # Filter out silent/noise segments using Whisper's no_speech_prob
+            segments = self._filter_no_speech_segments(segments, threshold=0.6)
+            self._log(f"Local Whisper produced {len(segments)} segments (after VAD filter)")
             events = self._process_transcript_segments(segments, time_offset=0)
 
             if progress_callback:
@@ -563,8 +648,9 @@ class VideoProcessor:
     def _detect_pose_events(self, frame, current_seconds, last_event_sec, debounce):
         """
         Detect hand-raise gestures using rtmlib RTMPose.
-        COCO-17 keypoints: 0=nose, 9=left_wrist, 10=right_wrist
-        Hand raised = wrist Y < nose Y (Y increases downward in image coords).
+        COCO-17 keypoints: 0=nose, 5/6=shoulders, 9/10=wrists
+        Hand raised = wrist Y < nose Y AND wrist Y < shoulder Y - margin.
+        Counts ALL detected persons with raised hands (multi-person voting).
         Returns an event dict or None.
         """
         if self.body_detector is None:
@@ -583,40 +669,56 @@ class VideoProcessor:
         if keypoints is None or len(keypoints) == 0:
             return None
 
-        # Check each detected person
         MIN_KP_CONF = 0.3
+        SHOULDER_MARGIN = 30  # pixels above shoulder to count as "raised"
+        hands_raised = 0
+
         for person_idx in range(len(keypoints)):
             kp = keypoints[person_idx]   # shape (17, 2) — x, y
             sc = scores[person_idx]      # shape (17,)
 
-            nose_y = kp[0][1]
-            nose_conf = sc[0]
-            lwrist_y = kp[9][1]
-            lwrist_conf = sc[9]
-            rwrist_y = kp[10][1]
-            rwrist_conf = sc[10]
+            nose_y, nose_conf = kp[0][1], sc[0]
+            lwrist_y, lwrist_conf = kp[9][1], sc[9]
+            rwrist_y, rwrist_conf = kp[10][1], sc[10]
+            lshoulder_y, lshoulder_conf = kp[5][1], sc[5]
+            rshoulder_y, rshoulder_conf = kp[6][1], sc[6]
 
             if nose_conf < MIN_KP_CONF:
                 continue
 
-            left_raised = lwrist_conf > MIN_KP_CONF and lwrist_y < nose_y
-            right_raised = rwrist_conf > MIN_KP_CONF and rwrist_y < nose_y
+            left_raised = (
+                lwrist_conf > MIN_KP_CONF
+                and lshoulder_conf > MIN_KP_CONF
+                and lwrist_y < nose_y
+                and lwrist_y < (lshoulder_y - SHOULDER_MARGIN)
+            )
+            right_raised = (
+                rwrist_conf > MIN_KP_CONF
+                and rshoulder_conf > MIN_KP_CONF
+                and rwrist_y < nose_y
+                and rwrist_y < (rshoulder_y - SHOULDER_MARGIN)
+            )
 
             if left_raised or right_raised:
-                return {
-                    'timestamp': self._format_timestamp(current_seconds),
-                    'activity_name': 'Voting',
-                    'source': 'Video',
-                    'details': 'Hand Raised (RTMPose)',
-                    'raw_seconds': current_seconds,
-                }
+                hands_raised += 1
 
-        return None
+        if hands_raised == 0:
+            return None
+
+        activity = "Voting" if hands_raised == 1 else f"Voting ({hands_raised} hands)"
+        return {
+            'timestamp': self._format_timestamp(current_seconds),
+            'activity_name': activity,
+            'source': 'Video',
+            'details': f'Hand Raised (RTMPose) - {hands_raised} person(s)',
+            'raw_seconds': current_seconds,
+            'hands_count': hands_raised,
+        }
 
     def _detect_motion_events(self, frame, current_seconds, last_event_sec, debounce):
         """
         Detect significant motion / speaker activity using OpenCV MOG2 background subtraction.
-        If >8% of pixels are foreground → 'Speaker Activity' event.
+        Uses morphological opening to remove noise pixels, then checks if >15% are foreground.
         Returns an event dict or None.
         """
         # Skip during MOG2 warmup period (first 15 seconds produce false positives)
@@ -631,12 +733,14 @@ class VideoProcessor:
             # Resize to 320x240 for speed
             small = cv2.resize(frame, (320, 240))
             fg_mask = self.bg_subtractor.apply(small)
+            # Morphological opening to remove salt-and-pepper noise pixels
+            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self._morph_kernel)
             fg_ratio = np.count_nonzero(fg_mask) / fg_mask.size
         except Exception as e:
             self._log(f"Motion detection error at {current_seconds:.1f}s: {e}")
             return None
 
-        MOTION_THRESHOLD = 0.08  # 8% foreground pixels
+        MOTION_THRESHOLD = 0.15  # 15% foreground pixels (raised from 8% to reduce false positives)
         if fg_ratio > MOTION_THRESHOLD:
             return {
                 'timestamp': self._format_timestamp(current_seconds),
@@ -648,13 +752,34 @@ class VideoProcessor:
 
         return None
 
+    def _link_visual_to_nearest_audio(self, visual_events, audio_events, max_gap_seconds=15):
+        """Link each visual event to the nearest audio event within ±max_gap_seconds.
+
+        Adds 'nearest_audio_activity' field for downstream agenda mapping.
+        """
+        if not audio_events or not visual_events:
+            return visual_events
+
+        audio_seconds = np.array([e['raw_seconds'] for e in audio_events])
+
+        for vis in visual_events:
+            vis_sec = vis['raw_seconds']
+            diffs = np.abs(audio_seconds - vis_sec)
+            min_idx = int(np.argmin(diffs))
+            if diffs[min_idx] <= max_gap_seconds:
+                vis['nearest_audio_activity'] = audio_events[min_idx].get('activity_name', '')
+            else:
+                vis['nearest_audio_activity'] = None
+
+        return visual_events
+
     def fuse_events(self, audio_events, visual_events):
         """
         Fuse audio and visual events based on temporal proximity and logic.
 
         Fusion rules:
         1. Audio "Vote" + Visual "Voting" within ±5s → "Confirmed Vote" (Fused)
-        2. Any audio event + Visual "Speaker Activity" within ±10s → source becomes "Audio+Motion"
+        2. Speech-related audio + Visual "Speaker Activity" within ±10s → source "Audio+Motion"
         3. Unused visual events are appended as standalone
         """
         fused_events = []
@@ -672,14 +797,21 @@ class VideoProcessor:
         used_visual_indices = set()
 
         # Separate visual events by type for targeted matching
-        voting_mask = df_visual['activity_name'] == 'Voting'
+        voting_mask = df_visual['activity_name'].str.contains('Voting', na=False)
         motion_mask = df_visual['activity_name'] == 'Speaker Activity'
         df_voting = df_visual[voting_mask]
         df_motion = df_visual[motion_mask]
 
+        # Only speech-related activities can be enriched with motion (avoids enriching procedural events)
+        MOTION_ENRICHABLE = {
+            'Public Comment', 'Open Public Comment', 'Close Public Comment',
+            'Discussion', 'Staff Presentation', 'Staff Report',
+            'Budget Discussion', 'Discuss Ordinance', 'Discuss Resolution',
+        }
+
         for _, audio_row in df_audio.iterrows():
             audio_sec = audio_row['raw_seconds']
-            is_vote_context = "Vote" in audio_row['activity_name']
+            is_vote_context = "Vote" in str(audio_row['activity_name'])
             fused = False
 
             # Rule 1: Audio vote + Visual hand raise → Confirmed Vote
@@ -700,19 +832,25 @@ class VideoProcessor:
                         used_visual_indices.add(idx)
                     fused = True
 
-            # Rule 2: Any audio event + nearby motion → Audio+Motion enrichment
+            # Rule 2: Speech-related audio + nearby motion → Audio+Motion enrichment
             if not fused and not df_motion.empty:
-                nearby_motion = df_motion[
-                    (df_motion['raw_seconds'] >= audio_sec - 10) &
-                    (df_motion['raw_seconds'] <= audio_sec + 10)
-                ]
-                if not nearby_motion.empty:
-                    event = audio_row.to_dict()
-                    event['source'] = 'Audio+Motion'
-                    fused_events.append(event)
-                    for idx in nearby_motion.index:
-                        used_visual_indices.add(idx)
-                    fused = True
+                activity = str(audio_row['activity_name'])
+                is_enrichable = (
+                    activity in MOTION_ENRICHABLE
+                    or activity.startswith("Discussion:")
+                )
+                if is_enrichable:
+                    nearby_motion = df_motion[
+                        (df_motion['raw_seconds'] >= audio_sec - 10) &
+                        (df_motion['raw_seconds'] <= audio_sec + 10)
+                    ]
+                    if not nearby_motion.empty:
+                        event = audio_row.to_dict()
+                        event['source'] = 'Audio+Motion'
+                        fused_events.append(event)
+                        for idx in nearby_motion.index:
+                            used_visual_indices.add(idx)
+                        fused = True
 
             if not fused:
                 fused_events.append(audio_row.to_dict())
@@ -724,47 +862,90 @@ class VideoProcessor:
 
         return fused_events
 
-    def process_video(self, video_path, use_local_whisper=False, local_whisper_model="base"):
+    def _cluster_events(self, events, gap_seconds=5):
+        """Group near-simultaneous events and keep the highest-confidence per cluster.
+
+        Priority: Fused > Audio+Motion > Audio > Video; specific label > generic Discussion.
+        """
+        if not events or len(events) <= 1:
+            return events
+
+        SOURCE_PRIORITY = {
+            'Fused (Audio+Video)': 4,
+            'Audio+Motion': 3,
+            'Audio': 2,
+            'Video': 1,
+        }
+
+        def event_priority(e):
+            source_score = SOURCE_PRIORITY.get(e.get('source', 'Audio'), 2)
+            name = str(e.get('activity_name', ''))
+            name_score = 0 if name == 'Discussion' else 1
+            return (source_score, name_score)
+
+        sorted_events = sorted(events, key=lambda e: e.get('raw_seconds', 0))
+
+        clusters = [[sorted_events[0]]]
+        for evt in sorted_events[1:]:
+            prev_time = clusters[-1][-1].get('raw_seconds', 0)
+            curr_time = evt.get('raw_seconds', 0)
+            if (curr_time - prev_time) <= gap_seconds:
+                clusters[-1].append(evt)
+            else:
+                clusters.append([evt])
+
+        result = [max(cluster, key=event_priority) for cluster in clusters]
+        deduplicated = len(events) - len(result)
+        if deduplicated > 0:
+            self._log(f"Temporal clustering: {len(events)} -> {len(result)} (-{deduplicated} duplicates)")
+
+        return result
+
+    def process_video(self, video_path, use_local_whisper=False, local_whisper_model="base",
+                       progress_callback=None, return_separate=False):
         """
         Main method to process both audio and visuals.
-        Returns a Pandas DataFrame.
 
         Args:
             use_local_whisper: If True, use local openai-whisper (no API cost).
             local_whisper_model: Model size for local whisper ('tiny','base','small','medium','large').
+            progress_callback: Optional callable(percent: int, text: str) for progress updates.
+                               If None, progress is silently ignored (headless mode).
+            return_separate: If True, return (audio_events, visual_events) lists instead of fused DataFrame.
+                             Useful for separate caching in test_pipeline.py.
+
+        Returns:
+            pd.DataFrame (default) or tuple(list, list) if return_separate=True.
         """
-        # Create a progress bar
-        import streamlit as st
-        progress_bar = st.progress(0, text="Starting video analysis...")
+        def _progress(percent, text=""):
+            if progress_callback:
+                progress_callback(percent, text)
 
         # 1. Process Audio
-        progress_bar.progress(10, text="Extracting audio from video...")
+        _progress(10, "Extracting audio from video...")
         audio_path = self.extract_audio(video_path)
         if not audio_path:
             self._log("Audio extraction returned None; skipping transcription.")
 
-        progress_bar.progress(30, text="Preparing audio for transcription...")
-
-        def update_transcription_progress(percent, text):
-            progress_bar.progress(percent, text=text)
+        _progress(30, "Preparing audio for transcription...")
 
         if audio_path:
             if use_local_whisper:
                 audio_events = self.transcribe_audio_local(
                     audio_path,
-                    progress_callback=update_transcription_progress,
+                    progress_callback=progress_callback,
                     model_size=local_whisper_model,
                 )
             else:
                 audio_events = self.transcribe_audio(
-                    audio_path, progress_callback=update_transcription_progress
+                    audio_path, progress_callback=progress_callback
                 )
         else:
             audio_events = []
         self._log(f"Audio events count: {len(audio_events)}")
-        
+
         # 2. Process Visuals (rtmlib pose + OpenCV motion — degrades gracefully)
-        progress_bar.progress(70, text="Analyzing visual gestures...")
+        _progress(70, "Analyzing visual gestures...")
         try:
             visual_events = self.process_visuals(video_path)
             self._log(f"Visual events count: {len(visual_events)}")
@@ -772,21 +953,26 @@ class VideoProcessor:
             self._log(f"Visual processing failed (skipping): {e}")
             print(f"[VideoProcessor] WARNING: visual processing skipped — {e}")
             visual_events = []
-        
-        # 3. Fuse
-        progress_bar.progress(90, text="Fusing audio and visual events...")
+
+        # Link visual events to nearest audio events for downstream mapping
+        visual_events = self._link_visual_to_nearest_audio(visual_events, audio_events)
+
+        # Return raw lists for separate caching if requested
+        if return_separate:
+            return audio_events, visual_events
+
+        # 3. Fuse + temporal clustering
+        _progress(90, "Fusing audio and visual events...")
         fused_list = self.fuse_events(audio_events, visual_events)
-        
+        fused_list = self._cluster_events(fused_list, gap_seconds=5)
+
         if not fused_list:
-            progress_bar.empty()
+            _progress(100, "Analysis complete!")
             return pd.DataFrame(columns=['timestamp', 'activity_name', 'source', 'details'])
-            
+
         df = pd.DataFrame(fused_list)
         df = df.sort_values(by='raw_seconds').drop(columns=['raw_seconds']).reset_index(drop=True)
-        
-        progress_bar.progress(100, text="Analysis complete!")
-        time.sleep(1) # Let user see completion
-        progress_bar.empty()
-        
+
+        _progress(100, "Analysis complete!")
         return df
 

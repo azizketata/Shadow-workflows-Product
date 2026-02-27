@@ -24,59 +24,129 @@ def generate_agenda_bpmn(agenda_text, api_key):
 
     try:
         client = openai.OpenAI(api_key=api_key)
-        
-        prompt = f"""
-        Extract a sequential list of activities/topics from the following meeting agenda.
-        Return ONLY a JSON array of strings, where each string is a concise activity label (3-6 words).
-        Include sub-items if they represent distinct steps (e.g. "Open Public Hearing", "Close Public Hearing").
-        Ensure the order matches the agenda exactly.
 
-        Agenda:
-        {agenda_text}
-        """
+        prompt = f"""Extract a list of activities/topics from the following meeting agenda.
+Return a JSON object with this structure:
+{{
+  "activities": [
+    {{"label": "Call to Order", "group": null}},
+    {{"label": "Consent Item A", "group": "consent"}},
+    {{"label": "Consent Item B", "group": "consent"}},
+    {{"label": "Staff Report", "group": null}}
+  ]
+}}
+
+Rules:
+- Each activity has a concise label (3-6 words)
+- Activities that can occur simultaneously (e.g., consent agenda sub-items, concurrent staff reports) should share the same "group" string
+- Sequential activities (most items) should have "group": null
+- Include sub-items if they represent distinct steps (e.g. "Open Public Hearing", "Close Public Hearing")
+- Ensure the order matches the agenda exactly
+
+Agenda:
+{agenda_text}"""
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are an expert at extracting structured process activities from meeting agendas. Be precise and concise."},
+                {"role": "system", "content": "You are an expert at extracting structured process activities from meeting agendas. Be precise and concise. Return valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.0
         )
-        
+
         content = response.choices[0].message.content
-        # robust parsing logic in case of extra text
-        start_idx = content.find('[')
-        end_idx = content.rfind(']') + 1
-        if start_idx == -1 or end_idx == 0:
-            raise ValueError("Could not find JSON array in response")
-            
-        activities = json.loads(content[start_idx:end_idx])
-        
-        # Build BPMN using PM4Py 2.7.x API
-        # In recent versions, we add nodes directly to the graph using add_node() and add_flow()
+
+        # Parse response — handle both new format (dict with "activities") and legacy (plain array)
+        # Try dict format first
+        activities_data = None
+        try:
+            brace_start = content.find('{')
+            brace_end = content.rfind('}') + 1
+            if brace_start != -1 and brace_end > 0:
+                parsed = json.loads(content[brace_start:brace_end])
+                if isinstance(parsed, dict) and "activities" in parsed:
+                    activities_data = parsed["activities"]
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Fallback: try plain array
+        if activities_data is None:
+            start_idx = content.find('[')
+            end_idx = content.rfind(']') + 1
+            if start_idx == -1 or end_idx == 0:
+                raise ValueError("Could not find JSON in response")
+            parsed = json.loads(content[start_idx:end_idx])
+            if isinstance(parsed, list):
+                activities_data = [
+                    {"label": a, "group": None} if isinstance(a, str) else a
+                    for a in parsed
+                ]
+            else:
+                raise ValueError("Unexpected JSON structure in response")
+
+        activities = [a["label"] if isinstance(a, dict) else str(a) for a in activities_data]
+
+        # Build BPMN with parallel gateways for grouped activities
         bpmn_graph = BPMN()
-        
-        # Create nodes
+
         start_event = BPMN.StartEvent(name="Start")
         bpmn_graph.add_node(start_event)
-        
+
         end_event = BPMN.EndEvent(name="End")
         bpmn_graph.add_node(end_event)
-        
+
         previous_node = start_event
-        
-        for i, act_label in enumerate(activities):
-            task = BPMN.Task(name=act_label)
-            bpmn_graph.add_node(task)
-            
-            # Add flow from previous node to current task
-            flow = BPMN.SequenceFlow(previous_node, task)
-            bpmn_graph.add_flow(flow)
-            
-            previous_node = task
-        
-        # Connect last task to end event
+
+        i = 0
+        while i < len(activities_data):
+            act = activities_data[i]
+            group = act.get("group") if isinstance(act, dict) else None
+
+            if group is None:
+                # Sequential task
+                label = act["label"] if isinstance(act, dict) else str(act)
+                task = BPMN.Task(name=label)
+                bpmn_graph.add_node(task)
+                bpmn_graph.add_flow(BPMN.SequenceFlow(previous_node, task))
+                previous_node = task
+                i += 1
+            else:
+                # Collect all consecutive activities in this group
+                group_items = []
+                while i < len(activities_data):
+                    a = activities_data[i]
+                    g = a.get("group") if isinstance(a, dict) else None
+                    if g != group:
+                        break
+                    group_items.append(a)
+                    i += 1
+
+                if len(group_items) == 1:
+                    label = group_items[0]["label"] if isinstance(group_items[0], dict) else str(group_items[0])
+                    task = BPMN.Task(name=label)
+                    bpmn_graph.add_node(task)
+                    bpmn_graph.add_flow(BPMN.SequenceFlow(previous_node, task))
+                    previous_node = task
+                else:
+                    # Parallel gateway: fork -> parallel tasks -> join
+                    fork = BPMN.ParallelGateway(name=f"Fork_{group}")
+                    bpmn_graph.add_node(fork)
+                    bpmn_graph.add_flow(BPMN.SequenceFlow(previous_node, fork))
+
+                    join = BPMN.ParallelGateway(name=f"Join_{group}")
+                    bpmn_graph.add_node(join)
+
+                    for item in group_items:
+                        label = item["label"] if isinstance(item, dict) else str(item)
+                        task = BPMN.Task(name=label)
+                        bpmn_graph.add_node(task)
+                        bpmn_graph.add_flow(BPMN.SequenceFlow(fork, task))
+                        bpmn_graph.add_flow(BPMN.SequenceFlow(task, join))
+
+                    previous_node = join
+
+        # Connect last node to end event
         final_flow = BPMN.SequenceFlow(previous_node, end_event)
         bpmn_graph.add_flow(final_flow)
 
@@ -191,7 +261,12 @@ def generate_colored_bpmn(bpmn_graph, alignments):
         
     gviz.body = new_body
     gviz.attr(rankdir='TB')
-    
+
+    # Add log-only moves (deviations/shadow workflows) to compliance info
+    for label, count in log_move_counts.items():
+        if label not in compliance_info and label is not None and label != ">>":
+            compliance_info[label] = "deviation"
+
     return gviz, compliance_info
 
 def convert_to_event_log(df):
