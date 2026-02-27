@@ -174,34 +174,39 @@ Agenda:
         # Return None for the BPMN object so we don't crash downstream
         return err_g, [], None
 
-def generate_colored_bpmn(bpmn_graph, alignments):
+def generate_colored_bpmn(bpmn_graph, alignments, accepted_deviations=None):
     """
     Generates a color-coded BPMN visualization based on alignment diagnostics.
-    
+    Accepted deviations are rendered as red nodes connected to the nearest formal activity.
+
     Args:
         bpmn_graph (pm4py.objects.bpmn.obj.BPMN): The reference BPMN model.
         alignments (list): List of alignment dictionaries from pm4py.
-        
+        accepted_deviations (set|None): Labels that the user accepted as formal variants.
+
     Returns:
         tuple: (graphviz.Digraph, dict) - The colored graph and compliance info map.
     """
     from pm4py.visualization.bpmn import visualizer as bpmn_visualizer
     import graphviz
-    
+
     if not bpmn_graph or not alignments:
         return None, {}
+
+    if accepted_deviations is None:
+        accepted_deviations = set()
 
     # 1. Analyze Alignments to count moves
     model_move_counts = {} # Activity -> Count of "Model Move Only" (Skipped)
     log_move_counts = {}   # Activity -> Count of "Log Move Only" (Deviation)
     sync_move_counts = {}  # Activity -> Count of "Sync" (Match)
-    
+
     for align in alignments:
         trace_alignment = align['alignment']
         for log_move, model_move in trace_alignment:
             is_log_skip = (log_move is None or log_move == '>>')
             is_model_skip = (model_move is None or model_move == '>>')
-            
+
             if not is_log_skip and not is_model_skip:
                 if log_move == model_move:
                     sync_move_counts[model_move] = sync_move_counts.get(model_move, 0) + 1
@@ -209,30 +214,52 @@ def generate_colored_bpmn(bpmn_graph, alignments):
                 model_move_counts[model_move] = model_move_counts.get(model_move, 0) + 1
             elif not is_log_skip and is_model_skip:
                 log_move_counts[log_move] = log_move_counts.get(log_move, 0) + 1
-                
+
+    # 1b. Find the nearest preceding formal activity for each deviation
+    deviation_anchors = {}  # deviation_label -> nearest_formal_label
+    for align in alignments:
+        last_sync = None
+        for log_move, model_move in align['alignment']:
+            is_log_skip = (log_move is None or log_move == '>>')
+            is_model_skip = (model_move is None or model_move == '>>')
+            if not is_log_skip and not is_model_skip and log_move == model_move:
+                last_sync = model_move
+            elif not is_log_skip and is_model_skip:
+                if log_move in accepted_deviations and last_sync and log_move not in deviation_anchors:
+                    deviation_anchors[log_move] = last_sync
+
     # 2. Generate Base Graphviz Object
     parameters = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
     gviz = bpmn_visualizer.apply(bpmn_graph, parameters=parameters)
-    
+
     # 3. Build compliance info map for UI display
     compliance_info = {}
-    
-    # 4. Apply Colors and build compliance info
+
+    # 4. Apply Colors, build compliance info, and extract label->node_id mapping
     new_body = []
+    label_to_node = {}
     for line in gviz.body:
         if 'label=' in line and 'shape=' in line:
             try:
+                # Extract node_id (first quoted string on the line)
+                nid_start = line.find('"') + 1
+                nid_end = line.find('"', nid_start)
+                node_id = line[nid_start:nid_end] if nid_start > 0 and nid_end > nid_start else None
+
                 start_quote = line.find('label="') + 7
                 end_quote = line.find('"', start_quote)
                 label = line[start_quote:end_quote]
-                
+
+                if node_id and label:
+                    label_to_node[label] = node_id
+
                 fill_color = "white"
                 pen_width = "1"
                 color = "black"
-                
+
                 syncs = sync_move_counts.get(label, 0)
                 skips = model_move_counts.get(label, 0)
-                
+
                 total = syncs + skips
                 if total > 0:
                     if skips > syncs:
@@ -249,23 +276,47 @@ def generate_colored_bpmn(bpmn_graph, alignments):
                         compliance_info[label] = "executed"
                 else:
                     style = "filled"
-                    
+
                 line = line.rstrip(';\n')
                 line = line.rstrip(']')
                 line += f', style="{style}", fillcolor="{fill_color}", color="{color}", penwidth="{pen_width}"];'
-                
+
             except:
                 pass
-                
+
         new_body.append(line)
-        
+
     gviz.body = new_body
     gviz.attr(rankdir='TB')
 
     # Add log-only moves (deviations/shadow workflows) to compliance info
     for label, count in log_move_counts.items():
         if label not in compliance_info and label is not None and label != ">>":
-            compliance_info[label] = "deviation"
+            if label in accepted_deviations:
+                compliance_info[label] = "accepted"
+            else:
+                compliance_info[label] = "deviation"
+
+    # 5. Add accepted deviations as red nodes connected to their nearest formal activity
+    for i, dev_label in enumerate(sorted(accepted_deviations)):
+        dev_node_id = f"accepted_shadow_{i}"
+        # Escape quotes in label for graphviz
+        safe_label = dev_label.replace('"', '\\"')
+        # Red-filled node with bold border
+        gviz.body.append(
+            f'\t"{dev_node_id}" [label="{safe_label}" shape=box '
+            f'style="filled,bold" fillcolor="#fde8e8" color="#dc2626" '
+            f'penwidth="2.5" fontcolor="#991b1b"];'
+        )
+        # Connect with dashed red edge from the nearest formal activity
+        anchor_label = deviation_anchors.get(dev_label)
+        if anchor_label and anchor_label in label_to_node:
+            anchor_node_id = label_to_node[anchor_label]
+            gviz.body.append(
+                f'\t"{anchor_node_id}" -> "{dev_node_id}" '
+                f'[style=dashed color="#dc2626" penwidth="1.5" '
+                f'arrowhead=open constraint=false];'
+            )
 
     return gviz, compliance_info
 

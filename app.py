@@ -524,7 +524,10 @@ def render_reference_bpmn():
 
     with col1:
         if show_overlay and alignments:
-            colored_viz, compliance_info = generate_colored_bpmn(bpmn_obj, alignments)
+            colored_viz, compliance_info = generate_colored_bpmn(
+                bpmn_obj, alignments,
+                accepted_deviations=st.session_state.get("accepted_deviations", set()),
+            )
             if colored_viz:
                 ref_bpmn_placeholder.graphviz_chart(colored_viz, width='stretch')
                 st.caption("🟢 Executed  |  ⬜ Skipped  |  🔶 Shadow (see sidebar)")
@@ -535,6 +538,8 @@ def render_reference_bpmn():
                                 st.success(f"**{act}** — matched")
                             elif status == "skipped":
                                 st.warning(f"**{act}** — not detected")
+                            elif status == "accepted":
+                                st.error(f"**{act}** — accepted shadow (added to model)")
                             elif status == "deviation":
                                 st.error(f"**{act}** — shadow workflow (deviation)")
                             else:
