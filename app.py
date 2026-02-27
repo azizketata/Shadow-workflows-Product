@@ -438,25 +438,47 @@ st.markdown(
 metric_placeholder = st.empty()
 
 
-def render_metrics(fitness_pct=0.0, events_count=0, agenda_count=0, matched_count=0, shadow_count=0):
+def render_metrics(
+    fitness_raw_pct=0.0, fitness_dedup_pct=0.0,
+    events_count=0, agenda_count=0, matched_count=0, shadow_count=0,
+):
     """Render the top metric cards."""
-    # colour logic
+    # colour logic — based on dedup fitness (primary metric)
     if events_count == 0:
         fit_cls = "blue"
-    elif fitness_pct >= 65:
+        dedup_cls = "blue"
+    elif fitness_dedup_pct >= 65:
         fit_cls = "green"
-    elif fitness_pct >= 40:
+        dedup_cls = "green"
+    elif fitness_dedup_pct >= 40:
         fit_cls = "amber"
+        dedup_cls = "amber"
     else:
         fit_cls = "red"
+        dedup_cls = "red"
+
+    # raw fitness colour (usually lower, separate colouring)
+    if events_count == 0:
+        raw_cls = "blue"
+    elif fitness_raw_pct >= 50:
+        raw_cls = "green"
+    elif fitness_raw_pct >= 25:
+        raw_cls = "amber"
+    else:
+        raw_cls = "red"
 
     metric_placeholder.markdown(
         f"""
 <div class="metric-row">
-    <div class="metric-card {fit_cls}">
-        <div class="label">Conformance Fitness</div>
-        <div class="value">{fitness_pct:.1f}%</div>
-        <div class="sub">Token-replay (PM4Py)</div>
+    <div class="metric-card {dedup_cls}">
+        <div class="label">Dedup Fitness (primary)</div>
+        <div class="value">{fitness_dedup_pct:.1f}%</div>
+        <div class="sub">First-occurrence trace</div>
+    </div>
+    <div class="metric-card {raw_cls}">
+        <div class="label">Raw Fitness</div>
+        <div class="value">{fitness_raw_pct:.1f}%</div>
+        <div class="sub">All events (strict)</div>
     </div>
     <div class="metric-card blue">
         <div class="label">Events Detected</div>
@@ -547,7 +569,7 @@ def render_reference_bpmn():
         if show_overlay and alignments:
             colored_viz, compliance_info = generate_colored_bpmn(bpmn_obj, alignments)
             if colored_viz:
-                ref_bpmn_placeholder.graphviz_chart(colored_viz, use_container_width=True)
+                ref_bpmn_placeholder.graphviz_chart(colored_viz, width='stretch')
                 st.caption("🟢 Executed  |  ⬜ Skipped  |  🔶 Shadow (see sidebar)")
                 if compliance_info:
                     with st.expander("Compliance Status per Agenda Item", expanded=False):
@@ -566,7 +588,7 @@ def render_reference_bpmn():
             params = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
             gviz = bpmn_visualizer.apply(bpmn_obj, parameters=params)
             gviz.attr(rankdir="TB")
-            ref_bpmn_placeholder.graphviz_chart(gviz, use_container_width=True)
+            ref_bpmn_placeholder.graphviz_chart(gviz, width='stretch')
             st.info("Process the video first to generate overlay data.")
         else:
             # Standard view
@@ -574,7 +596,7 @@ def render_reference_bpmn():
             params = {bpmn_visualizer.Variants.CLASSIC.value.Parameters.FORMAT: "svg"}
             gviz = bpmn_visualizer.apply(bpmn_obj, parameters=params)
             gviz.attr(rankdir="TB")
-            ref_bpmn_placeholder.graphviz_chart(gviz, use_container_width=True)
+            ref_bpmn_placeholder.graphviz_chart(gviz, width='stretch')
 
 
 render_reference_bpmn()
@@ -698,6 +720,7 @@ with col2:
 
                 # ── Phase 4: Compliance Check ──────────────────────────────────
                 fitness_score = 0.0
+                fitness_dedup = 0.0
                 alignments = []
                 mapped_events = abstracted_events
                 shadow_count = 0
@@ -722,6 +745,7 @@ with col2:
 
                     log_data_for_fitness = convert_to_event_log(mapped_events)
                     if log_data_for_fitness is not None:
+                        # Raw fitness (all events)
                         compliance_result = compliance_engine.calculate_fitness(
                             st.session_state["reference_bpmn"],
                             log_data_for_fitness,
@@ -729,7 +753,29 @@ with col2:
                         fitness_score = compliance_result.get("score", 0.0)
                         alignments = compliance_result.get("alignments", [])
                         st.session_state["last_alignments"] = alignments
-                        log_debug(f"Fitness: {fitness_score:.4f}")
+                        log_debug(f"Raw fitness: {fitness_score:.4f}")
+
+                        # Dedup fitness (first occurrence per agenda item)
+                        try:
+                            _act_col = "mapped_activity" if "mapped_activity" in mapped_events.columns else "activity_name"
+                            _formal = mapped_events[
+                                ~mapped_events[_act_col].str.startswith("Deviation:", na=False)
+                            ].copy()
+                            if not _formal.empty:
+                                _first = _formal.groupby(_act_col).first().reset_index()
+                                _first["__ts"] = _first["timestamp"].apply(_ts_to_sec)
+                                _first = _first.sort_values("__ts").drop(columns=["__ts"])
+                                _first["activity_name"] = _first[_act_col]
+                                _dedup_log = convert_to_event_log(_first)
+                                if _dedup_log is not None and not _dedup_log.empty:
+                                    _dedup_result = compliance_engine.calculate_fitness(
+                                        st.session_state["reference_bpmn"],
+                                        _dedup_log,
+                                    )
+                                    fitness_dedup = _dedup_result.get("score", 0.0)
+                                    log_debug(f"Dedup fitness: {fitness_dedup:.4f} (trace length: {len(_first)})")
+                        except Exception as e:
+                            log_debug(f"Dedup fitness error: {e}")
 
                         # Detect shadow activities for governance
                         for align in alignments:
@@ -739,9 +785,9 @@ with col2:
                                         st.session_state["deviations"].add(log_move)
 
                 # ── Update Metrics ─────────────────────────────────────────────
-                fitness_pct = fitness_score * 100
                 render_metrics(
-                    fitness_pct=fitness_pct,
+                    fitness_raw_pct=fitness_score * 100,
+                    fitness_dedup_pct=fitness_dedup * 100,
                     events_count=len(current_events),
                     agenda_count=len(st.session_state.get("agenda_activities", [])),
                     matched_count=matched_count,
@@ -753,7 +799,7 @@ with col2:
                     render_reference_bpmn()
 
                 # ── Warning banner ─────────────────────────────────────────────
-                if fitness_pct < 50 and not current_events.empty:
+                if fitness_dedup * 100 < 50 and not current_events.empty:
                     st.warning("Meeting deviating significantly from the planned agenda.")
 
                 # ── Status Bar ─────────────────────────────────────────────────
@@ -782,7 +828,7 @@ with col2:
                     if log_data is not None:
                         graph, evidence_map = generate_discovered_bpmn(log_data)
                         if graph:
-                            disc_bpmn_placeholder.graphviz_chart(graph, use_container_width=True)
+                            disc_bpmn_placeholder.graphviz_chart(graph, width='stretch')
 
                             if evidence_map:
                                 with st.expander("Evidence: Why was each process added?", expanded=False):
