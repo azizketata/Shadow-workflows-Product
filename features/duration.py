@@ -40,6 +40,11 @@ def compute_durations(
         return []
 
     df = mapped_events.copy()
+
+    # Filter out shadow/deviation items — they are not real agenda items
+    df = df[~df["mapped_activity"].str.startswith("Deviation:", na=False)].copy()
+    if df.empty:
+        return []
     df["_sec"] = df["timestamp"].apply(ts_to_seconds)
 
     # Total meeting span (first event to last event)

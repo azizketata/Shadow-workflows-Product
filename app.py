@@ -332,8 +332,9 @@ with tabs[3]:  # Shadow Timeline
         st.info("Process a video to view the shadow workflow timeline.")
 
 with tabs[4]:  # Transcript
-    if has_data:
-        transcript = build_annotated_transcript(mapped)
+    raw_evts = get_video_events()
+    if raw_evts is not None and not raw_evts.empty:
+        transcript = build_annotated_transcript(raw_evts, mapped_events=mapped)
         render_transcript(transcript)
     else:
         st.info("Process a video to view the annotated transcript.")

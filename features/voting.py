@@ -122,15 +122,11 @@ def render_voting_records(records: list) -> None:
     cols[2].metric("Failed", failed)
     cols[3].metric("Unclear", unclear)
 
-    # Build display dataframe with colour-coded confidence
+    # Build display dataframe
     df = pd.DataFrame(records)
-    conf_colors = {"high": "#2e7d32", "medium": "#f57f17", "low": "#c62828"}
-    df["confidence"] = df["source_confidence"].map(
-        lambda c: f":{conf_colors.get(c, '#555')}[{c}]"
-    )
     display_cols = [
         "timestamp", "agenda_item", "motion_text",
-        "hands_detected", "outcome", "confidence",
+        "hands_detected", "outcome", "source_confidence",
     ]
     st.dataframe(
         df[display_cols].rename(columns={
@@ -139,7 +135,7 @@ def render_voting_records(records: list) -> None:
             "motion_text": "Motion Text",
             "hands_detected": "Hands",
             "outcome": "Outcome",
-            "confidence": "Confidence",
+            "source_confidence": "Confidence",
         }),
         use_container_width=True,
         hide_index=True,

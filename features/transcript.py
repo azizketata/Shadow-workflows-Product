@@ -23,14 +23,19 @@ _COLORS = {
 
 # ── public API ───────────────────────────────────────────────────────
 
-def build_annotated_transcript(mapped_events: pd.DataFrame) -> list[dict]:
-    """Turn mapped events into an ordered, categorised transcript.
+def build_annotated_transcript(
+    raw_events: pd.DataFrame,
+    mapped_events: pd.DataFrame = None,
+) -> list[dict]:
+    """Turn raw video events into an ordered, categorised transcript.
 
     Parameters
     ----------
-    mapped_events : pd.DataFrame
-        Expected columns: ``timestamp``, ``activity_name``, ``source``,
-        ``original_text``, ``mapped_activity``.
+    raw_events : pd.DataFrame
+        The original video events with ``original_text`` column.
+    mapped_events : pd.DataFrame, optional
+        If provided, used to annotate each raw event with its
+        ``mapped_activity`` by closest timestamp matching.
 
     Returns
     -------
@@ -38,21 +43,51 @@ def build_annotated_transcript(mapped_events: pd.DataFrame) -> list[dict]:
         Each dict contains: timestamp, seconds, text, activity,
         mapped_to, category (formal | shadow | noise), source.
     """
-    if mapped_events.empty:
+    if raw_events is None or raw_events.empty:
         return []
 
-    df = mapped_events.copy()
+    df = raw_events.copy()
 
-    # Keep only rows with real transcript text
-    if "original_text" not in df.columns:
+    # Determine which column has transcript text
+    text_col = None
+    for col in ("original_text", "details", "activity_name"):
+        if col in df.columns:
+            non_empty = df[col].fillna("").str.strip().astype(bool)
+            if non_empty.any():
+                text_col = col
+                break
+
+    if text_col is None:
         return []
-    df = df[df["original_text"].fillna("").str.strip().astype(bool)].copy()
+
+    # Keep only rows with real text content
+    df = df[df[text_col].fillna("").str.strip().astype(bool)].copy()
     if df.empty:
         return []
 
+    # Build a timestamp → mapped_activity lookup from mapped_events
+    mapped_lookup = {}
+    if mapped_events is not None and not mapped_events.empty and "mapped_activity" in mapped_events.columns:
+        for _, row in mapped_events.iterrows():
+            sec = ts_to_seconds(row.get("timestamp", 0))
+            mapped_lookup[sec] = str(row["mapped_activity"])
+
     transcript: list[dict] = []
     for _, row in df.iterrows():
-        mapped = str(row.get("mapped_activity", "")) if pd.notna(row.get("mapped_activity")) else ""
+        text = str(row[text_col]).strip()
+        if not text:
+            continue
+
+        sec = ts_to_seconds(row.get("timestamp", 0))
+
+        # Try to find a mapped activity for this timestamp (exact or nearest)
+        mapped = mapped_lookup.get(sec, "")
+        if not mapped and mapped_lookup:
+            # Find nearest mapped timestamp within 30 seconds
+            closest_sec = min(mapped_lookup.keys(), key=lambda s: abs(s - sec))
+            if abs(closest_sec - sec) <= 30:
+                mapped = mapped_lookup[closest_sec]
+
         if not mapped:
             category = "noise"
         elif mapped.startswith("Deviation:"):
@@ -62,8 +97,8 @@ def build_annotated_transcript(mapped_events: pd.DataFrame) -> list[dict]:
 
         transcript.append({
             "timestamp": str(row.get("timestamp", "00:00:00")),
-            "seconds":   ts_to_seconds(row.get("timestamp", 0)),
-            "text":      str(row["original_text"]).strip(),
+            "seconds":   sec,
+            "text":      text,
             "activity":  str(row.get("activity_name", "")),
             "mapped_to": mapped,
             "category":  category,
