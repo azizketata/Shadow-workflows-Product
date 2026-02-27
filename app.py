@@ -10,7 +10,7 @@ from bpmn_gen import (
     generate_discovered_bpmn,
     generate_colored_bpmn,
 )
-from video_processor import VideoProcessor
+from video_processor import VideoProcessor, _RTMLIB_AVAILABLE
 from compliance_engine import ComplianceEngine
 
 # ── Page Config ────────────────────────────────────────────────────────────────
@@ -331,6 +331,15 @@ with st.sidebar:
             help="Lower = more lenient matching. 0.35 is optimal for LLM abstraction; 0.20 for LLM-free.",
         )
 
+    # ── Visual Detection ──────────────────────────────────────────────────────
+    with st.expander("Visual Detection", expanded=False):
+        if _RTMLIB_AVAILABLE:
+            st.success("RTMPose (rtmlib) — available", icon="✅")
+        else:
+            st.warning("rtmlib not installed — pose detection disabled", icon="⚠️")
+        st.caption("OpenCV MOG2 motion detection — always available")
+        st.caption("Detects: hand raises (voting) + speaker activity (motion)")
+
     st.divider()
 
     # ── Debug ──────────────────────────────────────────────────────────────────
@@ -441,20 +450,17 @@ metric_placeholder = st.empty()
 def render_metrics(
     fitness_raw_pct=0.0, fitness_dedup_pct=0.0,
     events_count=0, agenda_count=0, matched_count=0, shadow_count=0,
+    visual_votes=0, visual_motion=0,
 ):
     """Render the top metric cards."""
     # colour logic — based on dedup fitness (primary metric)
     if events_count == 0:
-        fit_cls = "blue"
         dedup_cls = "blue"
     elif fitness_dedup_pct >= 65:
-        fit_cls = "green"
         dedup_cls = "green"
     elif fitness_dedup_pct >= 40:
-        fit_cls = "amber"
         dedup_cls = "amber"
     else:
-        fit_cls = "red"
         dedup_cls = "red"
 
     # raw fitness colour (usually lower, separate colouring)
@@ -466,6 +472,10 @@ def render_metrics(
         raw_cls = "amber"
     else:
         raw_cls = "red"
+
+    # visual events colour
+    vis_total = visual_votes + visual_motion
+    vis_cls = "green" if vis_total > 0 else "blue"
 
     metric_placeholder.markdown(
         f"""
@@ -494,6 +504,11 @@ def render_metrics(
         <div class="label">Matched / Shadow</div>
         <div class="value">{matched_count} / {shadow_count}</div>
         <div class="sub">Formal vs informal</div>
+    </div>
+    <div class="metric-card {vis_cls}">
+        <div class="label">Visual Events</div>
+        <div class="value">{vis_total}</div>
+        <div class="sub">{visual_votes} votes · {visual_motion} motion</div>
     </div>
 </div>
 """,
@@ -784,6 +799,19 @@ with col2:
                                     if log_move not in st.session_state["accepted_deviations"]:
                                         st.session_state["deviations"].add(log_move)
 
+                # ── Compute visual event counts ─────────────────────────────────
+                _vis_votes = 0
+                _vis_motion = 0
+                if "source" in current_events.columns:
+                    _src = current_events["source"]
+                    _vis_votes = int((_src == "Video").sum() + (_src == "Fused (Audio+Video)").sum())
+                    _vis_motion = int((_src == "Audio+Motion").sum())
+                    # Also count standalone Video motion events
+                    if "activity_name" in current_events.columns:
+                        _vis_motion += int(
+                            ((current_events["activity_name"] == "Speaker Activity") & (_src == "Video")).sum()
+                        )
+
                 # ── Update Metrics ─────────────────────────────────────────────
                 render_metrics(
                     fitness_raw_pct=fitness_score * 100,
@@ -792,6 +820,8 @@ with col2:
                     agenda_count=len(st.session_state.get("agenda_activities", [])),
                     matched_count=matched_count,
                     shadow_count=shadow_count,
+                    visual_votes=_vis_votes,
+                    visual_motion=_vis_motion,
                 )
 
                 # ── Re-render reference BPMN with overlay if alignments changed ─

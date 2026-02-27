@@ -1,7 +1,7 @@
 import os
 import tempfile
 import cv2
-import mediapipe as mp
+import numpy as np
 import pandas as pd
 from moviepy import VideoFileClip
 from openai import OpenAI
@@ -12,19 +12,42 @@ import subprocess
 import shutil
 import re
 
+# Lazy import for rtmlib (ONNX-based pose estimation, no protobuf dependency)
+_RTMLIB_AVAILABLE = False
+try:
+    from rtmlib import Body
+    _RTMLIB_AVAILABLE = True
+except ImportError:
+    pass
+
 class VideoProcessor:
     def __init__(self, api_key, debug=False):
         """
-        Initialize the VideoProcessor with OpenAI API key and MediaPipe Pose.
+        Initialize the VideoProcessor with OpenAI API key and visual detection backends.
+        Uses rtmlib (RTMPose) for pose estimation and OpenCV MOG2 for motion detection.
         """
         self.client = OpenAI(api_key=api_key)
-        self.mp_pose = mp.solutions.pose
         self.debug = debug
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+
+        # --- Pose detection via rtmlib (replaces MediaPipe) ---
+        self.body_detector = None
+        if _RTMLIB_AVAILABLE:
+            try:
+                self.body_detector = Body(
+                    mode='lightweight',
+                    backend='onnxruntime',
+                    device='cpu',
+                )
+                self._log("rtmlib Body detector initialized (RTMPose lightweight, ONNX)")
+            except Exception as e:
+                self._log(f"rtmlib init failed: {e}")
+                self.body_detector = None
+        else:
+            self._log("rtmlib not available — pose detection disabled")
+
+        # --- Motion detection via OpenCV background subtraction ---
+        self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=500, varThreshold=50, detectShadows=False,
         )
         
         # Resolve ffmpeg binary for moviepy/imageio
@@ -463,26 +486,27 @@ class VideoProcessor:
 
     def process_visuals(self, video_path):
         """
-        Process video frames to detect gestures (raised hands) using MediaPipe Pose.
-        Returns a list of 'Voting' events.
+        Process video frames for visual events using:
+        - RTMPose (via rtmlib) for hand-raise / voting detection
+        - OpenCV MOG2 background subtraction for speaker-activity / motion detection
+        Returns a combined list of visual event dicts.
         """
         events = []
         cap = cv2.VideoCapture(video_path)
-        
+
         if not cap.isOpened():
-            print("Error opening video file")
+            self._log("Error opening video file for visual processing")
             return events
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
-            print("Warning: FPS is 0 or invalid, defaulting to 30 FPS")
+            self._log("FPS invalid, defaulting to 30")
             fps = 30.0
 
         total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
         total_duration_s = total_frames / fps if fps > 0 else 0
 
-        # For long videos, sample at most every 5 seconds to keep processing fast.
-        # For short videos keep per-second resolution (every fps frames).
+        # Adaptive sampling: 1-5 second intervals depending on video length
         sample_every_seconds = max(1, min(5, int(total_duration_s / 600)))
         sample_interval = max(1, int(fps * sample_every_seconds))
         self._log(
@@ -490,118 +514,214 @@ class VideoProcessor:
             f"sample_every={sample_every_seconds}s (every {sample_interval} frames)"
         )
 
-        frame_count = 0
+        # Debounce trackers (last event timestamp in seconds)
+        last_pose_event_sec = -999.0
+        last_motion_event_sec = -999.0
+        POSE_DEBOUNCE = 5.0    # seconds between hand-raise events
+        MOTION_DEBOUNCE = 10.0  # seconds between motion events
+        MOG2_WARMUP_SEC = 15.0  # skip motion detection until MOG2 has enough history
 
+        frame_count = 0
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
-            # Adaptive sample interval
             if frame_count % sample_interval == 0:
-                try:
-                    # Convert BGR to RGB
-                    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    results = self.pose.process(image_rgb)
-                except Exception as e:
-                    print(f"[VideoProcessor] MediaPipe frame error at frame {frame_count}: {e}")
-                    cap.release()
-                    return events  # return what we have so far
-                
-                if results.pose_landmarks:
-                    landmarks = results.pose_landmarks.landmark
-                    
-                    # Get relevant landmarks
-                    nose = landmarks[self.mp_pose.PoseLandmark.NOSE]
-                    left_wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
-                    right_wrist = landmarks[self.mp_pose.PoseLandmark.RIGHT_WRIST]
-                    
-                    # Check if hand is raised (Y coordinate is smaller when higher in image)
-                    # We assume 'raised' means wrist is significantly above the nose
-                    # Adding a small threshold or just strict comparison
-                    is_left_raised = left_wrist.y < nose.y
-                    is_right_raised = right_wrist.y < nose.y
-                    
-                    if is_left_raised or is_right_raised:
-                        # Calculate timestamp
-                        current_seconds = frame_count / fps
+                current_seconds = frame_count / fps
 
-                        # Debounce: skip if we already logged a voting event within 5 seconds
-                        if events and events[-1]['activity_name'] == 'Voting' and \
-                                (current_seconds - events[-1]['raw_seconds']) < 5:
-                            frame_count += 1
-                            continue
+                # Feed frame to MOG2 for background model warmup (even when not emitting events)
+                if current_seconds < MOG2_WARMUP_SEC:
+                    try:
+                        small = cv2.resize(frame, (320, 240))
+                        self.bg_subtractor.apply(small)
+                    except Exception:
+                        pass
 
-                        events.append({
-                            'timestamp': self._format_timestamp(current_seconds),
-                            'activity_name': 'Voting',
-                            'source': 'Video',
-                            'details': 'Hand Raised',
-                            'raw_seconds': current_seconds
-                        })
+                # --- Pose detection (hand raises) ---
+                pose_event = self._detect_pose_events(
+                    frame, current_seconds, last_pose_event_sec, POSE_DEBOUNCE
+                )
+                if pose_event:
+                    events.append(pose_event)
+                    last_pose_event_sec = current_seconds
+
+                # --- Motion detection (speaker activity) ---
+                motion_event = self._detect_motion_events(
+                    frame, current_seconds, last_motion_event_sec, MOTION_DEBOUNCE
+                )
+                if motion_event:
+                    events.append(motion_event)
+                    last_motion_event_sec = current_seconds
 
             frame_count += 1
-            
+
         cap.release()
+        self._log(f"Visual processing complete: {len(events)} events")
         return events
+
+    def _detect_pose_events(self, frame, current_seconds, last_event_sec, debounce):
+        """
+        Detect hand-raise gestures using rtmlib RTMPose.
+        COCO-17 keypoints: 0=nose, 9=left_wrist, 10=right_wrist
+        Hand raised = wrist Y < nose Y (Y increases downward in image coords).
+        Returns an event dict or None.
+        """
+        if self.body_detector is None:
+            return None
+
+        # Debounce check
+        if (current_seconds - last_event_sec) < debounce:
+            return None
+
+        try:
+            keypoints, scores = self.body_detector(frame)
+        except Exception as e:
+            self._log(f"RTMPose error at {current_seconds:.1f}s: {e}")
+            return None
+
+        if keypoints is None or len(keypoints) == 0:
+            return None
+
+        # Check each detected person
+        MIN_KP_CONF = 0.3
+        for person_idx in range(len(keypoints)):
+            kp = keypoints[person_idx]   # shape (17, 2) — x, y
+            sc = scores[person_idx]      # shape (17,)
+
+            nose_y = kp[0][1]
+            nose_conf = sc[0]
+            lwrist_y = kp[9][1]
+            lwrist_conf = sc[9]
+            rwrist_y = kp[10][1]
+            rwrist_conf = sc[10]
+
+            if nose_conf < MIN_KP_CONF:
+                continue
+
+            left_raised = lwrist_conf > MIN_KP_CONF and lwrist_y < nose_y
+            right_raised = rwrist_conf > MIN_KP_CONF and rwrist_y < nose_y
+
+            if left_raised or right_raised:
+                return {
+                    'timestamp': self._format_timestamp(current_seconds),
+                    'activity_name': 'Voting',
+                    'source': 'Video',
+                    'details': 'Hand Raised (RTMPose)',
+                    'raw_seconds': current_seconds,
+                }
+
+        return None
+
+    def _detect_motion_events(self, frame, current_seconds, last_event_sec, debounce):
+        """
+        Detect significant motion / speaker activity using OpenCV MOG2 background subtraction.
+        If >8% of pixels are foreground → 'Speaker Activity' event.
+        Returns an event dict or None.
+        """
+        # Skip during MOG2 warmup period (first 15 seconds produce false positives)
+        if current_seconds < 15.0:
+            return None
+
+        # Debounce check
+        if (current_seconds - last_event_sec) < debounce:
+            return None
+
+        try:
+            # Resize to 320x240 for speed
+            small = cv2.resize(frame, (320, 240))
+            fg_mask = self.bg_subtractor.apply(small)
+            fg_ratio = np.count_nonzero(fg_mask) / fg_mask.size
+        except Exception as e:
+            self._log(f"Motion detection error at {current_seconds:.1f}s: {e}")
+            return None
+
+        MOTION_THRESHOLD = 0.08  # 8% foreground pixels
+        if fg_ratio > MOTION_THRESHOLD:
+            return {
+                'timestamp': self._format_timestamp(current_seconds),
+                'activity_name': 'Speaker Activity',
+                'source': 'Video',
+                'details': f'Motion detected ({fg_ratio:.1%} foreground)',
+                'raw_seconds': current_seconds,
+            }
+
+        return None
 
     def fuse_events(self, audio_events, visual_events):
         """
         Fuse audio and visual events based on temporal proximity and logic.
+
+        Fusion rules:
+        1. Audio "Vote" + Visual "Voting" within ±5s → "Confirmed Vote" (Fused)
+        2. Any audio event + Visual "Speaker Activity" within ±10s → source becomes "Audio+Motion"
+        3. Unused visual events are appended as standalone
         """
         fused_events = []
-        
-        # Convert to DataFrames for easier handling if they aren't already
+
         df_audio = pd.DataFrame(audio_events)
         df_visual = pd.DataFrame(visual_events)
-        
+
         if df_audio.empty and df_visual.empty:
             return []
-            
         if df_visual.empty:
             return audio_events
-            
         if df_audio.empty:
             return visual_events
 
-        # Track used visual events to avoid duplication
         used_visual_indices = set()
 
-        # Iterate through audio events (primary stream)
+        # Separate visual events by type for targeted matching
+        voting_mask = df_visual['activity_name'] == 'Voting'
+        motion_mask = df_visual['activity_name'] == 'Speaker Activity'
+        df_voting = df_visual[voting_mask]
+        df_motion = df_visual[motion_mask]
+
         for _, audio_row in df_audio.iterrows():
-            # Check for visual confirmation (Voting)
-            # Logic: If Audio says "Vote" and Visual has "Voting" within +/- 5 seconds
-            
+            audio_sec = audio_row['raw_seconds']
             is_vote_context = "Vote" in audio_row['activity_name']
-            
-            # Find nearby visual events
-            nearby_visuals = df_visual[
-                (df_visual['raw_seconds'] >= audio_row['raw_seconds'] - 5) & 
-                (df_visual['raw_seconds'] <= audio_row['raw_seconds'] + 5)
-            ]
-            
-            if is_vote_context and not nearby_visuals.empty:
-                # FUSION: Confirmed Vote
-                fused_events.append({
-                    'timestamp': audio_row['timestamp'],
-                    'activity_name': 'Confirmed Vote', # Fused Event Name
-                    'source': 'Fused (Audio+Video)',
-                    'details': f"Audio: {audio_row['details']} | Visual: {len(nearby_visuals)} hands detected",
-                    'raw_seconds': audio_row['raw_seconds']
-                })
-                # Mark these visual events as consumed
-                for idx in nearby_visuals.index:
-                    used_visual_indices.add(idx)
-            else:
-                # No fusion, keep original audio event
+            fused = False
+
+            # Rule 1: Audio vote + Visual hand raise → Confirmed Vote
+            if is_vote_context and not df_voting.empty:
+                nearby_votes = df_voting[
+                    (df_voting['raw_seconds'] >= audio_sec - 5) &
+                    (df_voting['raw_seconds'] <= audio_sec + 5)
+                ]
+                if not nearby_votes.empty:
+                    fused_events.append({
+                        'timestamp': audio_row['timestamp'],
+                        'activity_name': 'Confirmed Vote',
+                        'source': 'Fused (Audio+Video)',
+                        'details': f"Audio: {audio_row['details']} | Visual: {len(nearby_votes)} hands detected",
+                        'raw_seconds': audio_sec,
+                    })
+                    for idx in nearby_votes.index:
+                        used_visual_indices.add(idx)
+                    fused = True
+
+            # Rule 2: Any audio event + nearby motion → Audio+Motion enrichment
+            if not fused and not df_motion.empty:
+                nearby_motion = df_motion[
+                    (df_motion['raw_seconds'] >= audio_sec - 10) &
+                    (df_motion['raw_seconds'] <= audio_sec + 10)
+                ]
+                if not nearby_motion.empty:
+                    event = audio_row.to_dict()
+                    event['source'] = 'Audio+Motion'
+                    fused_events.append(event)
+                    for idx in nearby_motion.index:
+                        used_visual_indices.add(idx)
+                    fused = True
+
+            if not fused:
                 fused_events.append(audio_row.to_dict())
-                
-        # Add visual events that weren't used in fusion
-        # For independent gestures
+
+        # Append unused visual events as standalone
         for idx, vis_row in df_visual.iterrows():
-             if idx not in used_visual_indices:
-                 fused_events.append(vis_row.to_dict())
-             
+            if idx not in used_visual_indices:
+                fused_events.append(vis_row.to_dict())
+
         return fused_events
 
     def process_video(self, video_path, use_local_whisper=False, local_whisper_model="base"):
@@ -643,7 +763,7 @@ class VideoProcessor:
             audio_events = []
         self._log(f"Audio events count: {len(audio_events)}")
         
-        # 2. Process Visuals (optional — degrades gracefully on MediaPipe errors)
+        # 2. Process Visuals (rtmlib pose + OpenCV motion — degrades gracefully)
         progress_bar.progress(70, text="Analyzing visual gestures...")
         try:
             visual_events = self.process_visuals(video_path)
