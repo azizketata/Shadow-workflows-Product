@@ -55,6 +55,13 @@ class VideoProcessor:
     def _log(self, message):
         if self.debug:
             print(f"[VideoProcessor] {message}")
+
+    def _format_timestamp(self, total_seconds):
+        """Convert raw seconds to HH:MM:SS string."""
+        h = int(total_seconds // 3600)
+        m = int((total_seconds % 3600) // 60)
+        s = int(total_seconds % 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
             
     def extract_action_object(self, text):
         """
@@ -69,16 +76,63 @@ class VideoProcessor:
         except Exception:
             return "Discussion", text
         
-        # 1. Keyword Mapping (Heuristics for common meeting terms)
+        # 1. Keyword Mapping (Heuristics for council meeting terms)
         text_lower = text.lower()
-        if "move" in text_lower or "motion" in text_lower:
-            return "Propose Motion", text
-        if "second" in text_lower:
+        # Motions
+        # Vote Results — must come BEFORE generic "motion" check to avoid false match
+        if "the ayes have it" in text_lower or "motion carries" in text_lower or "motion passes" in text_lower:
+            return "Vote Result", text
+        if "motion failed" in text_lower or "motion fails" in text_lower:
+            return "Vote Result", text
+        # Seconds — check before generic "motion" to avoid "second the motion" → Propose Motion
+        if "i second" in text_lower or "seconded" in text_lower:
             return "Second Motion", text
-        if "vote" in text_lower or "all in favor" in text_lower or "opposed" in text_lower:
+        if "second" in text_lower and ("motion" in text_lower or "that" in text_lower):
+            return "Second Motion", text
+        # Motions
+        if "i move" in text_lower or "make a motion" in text_lower or "so moved" in text_lower:
+            return "Propose Motion", text
+        if "motion" in text_lower and ("introduce" in text_lower or "present" in text_lower):
+            return "Propose Motion", text
+        if ("motion" in text_lower or "move" in text_lower) and "second" not in text_lower:
+            return "Propose Motion", text
+        # Voting
+        if "all in favor" in text_lower or "those in favor" in text_lower:
             return "Call for Vote", text
+        if "opposed" in text_lower or "nay" in text_lower or "nays" in text_lower:
+            return "Call for Vote", text
+        if "roll call" in text_lower:
+            return "Roll Call Vote", text
+        if "vote" in text_lower:
+            return "Call for Vote", text
+        # Adjournment / Recess
         if "adjourn" in text_lower:
             return "Adjourn Meeting", text
+        if "recess" in text_lower:
+            return "Recess", text
+        # Public Comment
+        if "public comment" in text_lower or "public hearing" in text_lower:
+            return "Public Comment", text
+        if "open the floor" in text_lower or "floor is open" in text_lower:
+            return "Open Public Comment", text
+        if "close the" in text_lower and ("comment" in text_lower or "hearing" in text_lower):
+            return "Close Public Comment", text
+        # Agenda items
+        if "agenda item" in text_lower or "next item" in text_lower or "item number" in text_lower:
+            return "Introduce Agenda Item", text
+        if "ordinance" in text_lower:
+            return "Discuss Ordinance", text
+        if "resolution" in text_lower:
+            return "Discuss Resolution", text
+        if "approval" in text_lower or "approve" in text_lower:
+            return "Request Approval", text
+        # Presentations / Reports
+        if "present" in text_lower and ("report" in text_lower or "update" in text_lower):
+            return "Staff Presentation", text
+        if "staff report" in text_lower:
+            return "Staff Report", text
+        if "budget" in text_lower:
+            return "Budget Discussion", text
             
         # 2. General NLP Extraction (Verb + Object)
         for token in doc:
@@ -269,15 +323,89 @@ class VideoProcessor:
             except Exception as e:
                 print(f"Warning: Could not remove audio file {original_audio_path}: {e}")
 
+    def _process_transcript_segments(self, segments, time_offset):
+        """Convert Whisper transcript segments to event dicts."""
+        events = []
+        for segment in segments:
+            start_time = segment["start"] if isinstance(segment, dict) else segment.start
+            text_content = (segment["text"] if isinstance(segment, dict) else segment.text).strip()
+            if not text_content:
+                continue
+            activity_name, full_text = self.extract_action_object(text_content)
+            if full_text:
+                events.append({
+                    'timestamp': self._format_timestamp(start_time + time_offset),
+                    'activity_name': activity_name,
+                    'source': 'Audio',
+                    'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
+                    'raw_seconds': start_time + time_offset,
+                    'original_text': full_text,
+                })
+        return events
+
+    def transcribe_audio_local(self, audio_path, progress_callback=None, model_size="base"):
+        """
+        Transcribe audio using the local openai-whisper model (no API cost).
+        Falls back to API transcription if local whisper is unavailable.
+        """
+        try:
+            import whisper as local_whisper
+        except ImportError:
+            self._log("Local whisper not installed; falling back to API.")
+            return self.transcribe_audio(audio_path, progress_callback)
+
+        events = []
+        if not audio_path or not os.path.exists(audio_path):
+            self._log("transcribe_audio_local: audio path missing.")
+            return events
+
+        try:
+            if progress_callback:
+                progress_callback(35, f"Loading local Whisper model ({model_size})...")
+            self._log(f"Loading local Whisper model: {model_size}")
+            model = local_whisper.load_model(model_size)
+
+            if progress_callback:
+                progress_callback(40, "Transcribing with local Whisper (this may take a while)...")
+            self._log("Starting local Whisper transcription...")
+
+            COUNCIL_PROMPT = (
+                "City council meeting. Mayor, council members, staff, public attendees. "
+                "Topics: motions, voting, public comment, budget, ordinances, resolutions."
+            )
+            result = model.transcribe(
+                audio_path,
+                verbose=False,
+                initial_prompt=COUNCIL_PROMPT,
+                word_timestamps=False,
+            )
+            segments = result.get("segments", [])
+            self._log(f"Local Whisper produced {len(segments)} segments")
+            events = self._process_transcript_segments(segments, time_offset=0)
+
+            if progress_callback:
+                progress_callback(70, f"Local transcription complete: {len(events)} events")
+        except Exception as e:
+            self._log(f"Local Whisper error: {e}")
+            print(f"[VideoProcessor] Local Whisper failed: {e}")
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except Exception:
+                    pass
+
+        return events
+
     def transcribe_audio(self, audio_path, progress_callback=None):
         """
         Transcribe audio using OpenAI Whisper API.
         Handles large files by splitting into chunks under 25MB.
-        Returns a list of 'Discussion' events.
+        Returns a list of event dicts.
         """
         events = []
         chunks = []
-        
+
         if not audio_path or not os.path.exists(audio_path):
             self._log("transcribe_audio: audio path missing or invalid.")
             return events
@@ -286,13 +414,13 @@ class VideoProcessor:
             # Split audio into chunks if needed
             if progress_callback:
                 progress_callback(35, "Splitting audio into chunks...")
-                
+
             chunks = self.split_audio_into_chunks(audio_path)
             self._log(f"Transcription chunks count: {len(chunks)}")
             if not chunks:
                 self._log("No audio chunks available; skipping transcription.")
                 return events
-            
+
             total_chunks = len(chunks)
             for i, (chunk_path, time_offset) in enumerate(chunks):
                 try:
@@ -305,54 +433,32 @@ class VideoProcessor:
                         continue
 
                     if progress_callback:
-                        # Calculate progress between 40% and 70% based on chunks
                         percent = 40 + int((i / total_chunks) * 30)
                         progress_callback(percent, f"Transcribing chunk {i+1}/{total_chunks}...")
-                        
+
                     with open(chunk_path, "rb") as audio_file:
                         transcript = self.client.audio.transcriptions.create(
-                            model="whisper-1", 
+                            model="whisper-1",
                             file=audio_file,
-                            response_format="verbose_json"
+                            response_format="verbose_json",
+                            prompt=(
+                                "This is a city council meeting recording. "
+                                "Speakers include the Mayor, council members, city staff, and public attendees. "
+                                "Topics include motions, voting, public comment, budget discussions, "
+                                "ordinances, resolutions, and agenda items."
+                            ),
                         )
-                    
-                    # Process segments with time offset adjustment
-                    for segment in transcript.segments:
-                        # Add time offset to get actual timestamp in original video
-                        start_time = segment.start + time_offset
-                        
-                        # Format timestamp as MM:SS
-                        minutes = int(start_time // 60)
-                        seconds = int(start_time % 60)
-                        timestamp_str = f"{minutes:02d}:{seconds:02d}"
-                        
-                        text_content = segment.text.strip()
-                        if not text_content:
-                            continue
-                            
-                        activity_name, full_text = self.extract_action_object(text_content)
-                        
-                        # Double check to ensure we have valid text before appending
-                        if full_text:
-                            events.append({
-                                'timestamp': timestamp_str,
-                                'activity_name': activity_name,
-                                'source': 'Audio',
-                                'details': full_text[:100] + "..." if len(full_text) > 100 else full_text,
-                                'raw_seconds': start_time,
-                                'original_text': full_text
-                            })
-                            
+                    events.extend(self._process_transcript_segments(transcript.segments, time_offset))
+
                 except Exception as e:
                     self._log(f"Error transcribing chunk {chunk_path}: {e}")
                     continue
-                
+
         except Exception as e:
             self._log(f"Error transcribing audio: {e}")
         finally:
-            # Clean up all chunk files and original audio file
             self._cleanup_chunk_files(chunks, audio_path)
-                
+
         return events
 
     def process_visuals(self, video_path):
@@ -371,19 +477,36 @@ class VideoProcessor:
         if fps <= 0:
             print("Warning: FPS is 0 or invalid, defaulting to 30 FPS")
             fps = 30.0
-            
+
+        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        total_duration_s = total_frames / fps if fps > 0 else 0
+
+        # For long videos, sample at most every 5 seconds to keep processing fast.
+        # For short videos keep per-second resolution (every fps frames).
+        sample_every_seconds = max(1, min(5, int(total_duration_s / 600)))
+        sample_interval = max(1, int(fps * sample_every_seconds))
+        self._log(
+            f"Visual sampling: duration={total_duration_s:.0f}s, "
+            f"sample_every={sample_every_seconds}s (every {sample_interval} frames)"
+        )
+
         frame_count = 0
-        
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-            
-            # Sample every 30th frame
-            if frame_count % 30 == 0:
-                # Convert BGR to RGB
-                image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = self.pose.process(image_rgb)
+
+            # Adaptive sample interval
+            if frame_count % sample_interval == 0:
+                try:
+                    # Convert BGR to RGB
+                    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    results = self.pose.process(image_rgb)
+                except Exception as e:
+                    print(f"[VideoProcessor] MediaPipe frame error at frame {frame_count}: {e}")
+                    cap.release()
+                    return events  # return what we have so far
                 
                 if results.pose_landmarks:
                     landmarks = results.pose_landmarks.landmark
@@ -402,17 +525,15 @@ class VideoProcessor:
                     if is_left_raised or is_right_raised:
                         # Calculate timestamp
                         current_seconds = frame_count / fps
-                        minutes = int(current_seconds // 60)
-                        seconds = int(current_seconds % 60)
-                        timestamp_str = f"{minutes:02d}:{seconds:02d}"
-                        
-                        # Avoid spamming events - simple logic: check if we just added one recently?
-                        # For now, per requirements: "Map this to a 'Voting' event"
-                        # We might want to group them later, but let's stick to raw detection first
-                        # or simple de-duplication if it's the same second.
-                        
+
+                        # Debounce: skip if we already logged a voting event within 5 seconds
+                        if events and events[-1]['activity_name'] == 'Voting' and \
+                                (current_seconds - events[-1]['raw_seconds']) < 5:
+                            frame_count += 1
+                            continue
+
                         events.append({
-                            'timestamp': timestamp_str,
+                            'timestamp': self._format_timestamp(current_seconds),
                             'activity_name': 'Voting',
                             'source': 'Video',
                             'details': 'Hand Raised',
@@ -483,34 +604,54 @@ class VideoProcessor:
              
         return fused_events
 
-    def process_video(self, video_path):
+    def process_video(self, video_path, use_local_whisper=False, local_whisper_model="base"):
         """
         Main method to process both audio and visuals.
         Returns a Pandas DataFrame.
+
+        Args:
+            use_local_whisper: If True, use local openai-whisper (no API cost).
+            local_whisper_model: Model size for local whisper ('tiny','base','small','medium','large').
         """
         # Create a progress bar
         import streamlit as st
         progress_bar = st.progress(0, text="Starting video analysis...")
-        
+
         # 1. Process Audio
         progress_bar.progress(10, text="Extracting audio from video...")
         audio_path = self.extract_audio(video_path)
         if not audio_path:
             self._log("Audio extraction returned None; skipping transcription.")
-        
+
         progress_bar.progress(30, text="Preparing audio for transcription...")
-        
-        # Pass a lambda to update progress
+
         def update_transcription_progress(percent, text):
             progress_bar.progress(percent, text=text)
-            
-        audio_events = self.transcribe_audio(audio_path, progress_callback=update_transcription_progress) if audio_path else []
+
+        if audio_path:
+            if use_local_whisper:
+                audio_events = self.transcribe_audio_local(
+                    audio_path,
+                    progress_callback=update_transcription_progress,
+                    model_size=local_whisper_model,
+                )
+            else:
+                audio_events = self.transcribe_audio(
+                    audio_path, progress_callback=update_transcription_progress
+                )
+        else:
+            audio_events = []
         self._log(f"Audio events count: {len(audio_events)}")
         
-        # 2. Process Visuals
+        # 2. Process Visuals (optional — degrades gracefully on MediaPipe errors)
         progress_bar.progress(70, text="Analyzing visual gestures...")
-        visual_events = self.process_visuals(video_path)
-        self._log(f"Visual events count: {len(visual_events)}")
+        try:
+            visual_events = self.process_visuals(video_path)
+            self._log(f"Visual events count: {len(visual_events)}")
+        except Exception as e:
+            self._log(f"Visual processing failed (skipping): {e}")
+            print(f"[VideoProcessor] WARNING: visual processing skipped — {e}")
+            visual_events = []
         
         # 3. Fuse
         progress_bar.progress(90, text="Fusing audio and visual events...")

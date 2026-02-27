@@ -6,7 +6,7 @@ import tempfile
 import os
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 
 def generate_agenda_bpmn(agenda_text, api_key):
     """
@@ -27,17 +27,18 @@ def generate_agenda_bpmn(agenda_text, api_key):
         
         prompt = f"""
         Extract a sequential list of activities/topics from the following meeting agenda.
-        Return ONLY a JSON array of strings, where each string is a concise activity label.
-        Ensure the order matches the agenda.
-        
+        Return ONLY a JSON array of strings, where each string is a concise activity label (3-6 words).
+        Include sub-items if they represent distinct steps (e.g. "Open Public Hearing", "Close Public Hearing").
+        Ensure the order matches the agenda exactly.
+
         Agenda:
         {agenda_text}
         """
-        
+
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that extracts process activities from text."},
+                {"role": "system", "content": "You are an expert at extracting structured process activities from meeting agendas. Be precise and concise."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.0
@@ -216,10 +217,14 @@ def convert_to_event_log(df):
         try:
             parts = str(t_str).split(":")
             if len(parts) == 2:
-                return datetime.strptime(f"2023-01-01 00:{t_str}", "%Y-%m-%d %H:%M:%S")
-            if len(parts) == 3:
-                return datetime.strptime(f"2023-01-01 {t_str}", "%Y-%m-%d %H:%M:%S")
-            return datetime.now()
+                m, s = int(parts[0]), int(parts[1])
+                total_seconds = m * 60 + s
+            elif len(parts) == 3:
+                h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+                total_seconds = h * 3600 + m * 60 + s
+            else:
+                return datetime.now()
+            return datetime(2023, 1, 1) + timedelta(seconds=total_seconds)
         except:
             return datetime.now()
             

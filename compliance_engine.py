@@ -9,14 +9,18 @@ from typing import List, Optional
 import openai
 
 class ComplianceEngine:
-    def __init__(self):
+    def __init__(self, sbert_model_name='all-MiniLM-L6-v2'):
         """
         Initialize the ComplianceEngine with SBERT model.
+
+        Args:
+            sbert_model_name: SBERT model to use. Options:
+                - 'all-MiniLM-L6-v2' (fast, good coverage)
+                - 'all-mpnet-base-v2' (slower, higher precision)
         """
-        # Load SBERT model for semantic similarity
-        # 'all-MiniLM-L6-v2' is fast and efficient
+        self.sbert_model_name = sbert_model_name
         try:
-            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.model = SentenceTransformer(sbert_model_name)
         except Exception as e:
             st.error(f"Error loading SBERT model: {e}")
             self.model = None
@@ -44,25 +48,67 @@ class ComplianceEngine:
         secs = int(seconds % 60)
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
-    def _ollama_classify_window(self, model, agenda_tasks, window_events, timeout=60):
-        prompt = (
-            "You are abstracting micro-events from a meeting into higher-level activities.\n"
-            "Known formal agenda tasks:\n"
-            f"{agenda_tasks}\n\n"
-            "For these events, return ONE of:\n"
-            "- A matching formal agenda task\n"
-            "- A high-level \"Shadow Workflow\" label (recurrent informal pattern)\n"
-            "- \"Noise\" (discard)\n"
-            "If Shadow, use format: \"Shadow: <Label>\".\n"
-            "Return only the label.\n\n"
-            "Events:\n"
+    def _build_classification_prompt(self, agenda_tasks, window_events):
+        agenda_list = "\n".join(f"  - {t}" for t in agenda_tasks) if isinstance(agenda_tasks, list) else str(agenda_tasks)
+        return (
+            "You are an expert city council meeting analyst. Classify a window of meeting events "
+            "into a single activity label using the rules below.\n\n"
+            "FORMAL AGENDA TASKS (the planned activities for this meeting — prefer these):\n"
+            f"{agenda_list}\n\n"
+            "CLASSIFICATION RULES (in priority order):\n"
+            "1. FORMAL FIRST: If the events fit ANY of the formal agenda tasks above — even loosely — "
+            "return that EXACT task label. Err on the side of formal labels.\n"
+            "2. SHADOW (only if no agenda task fits): If events clearly represent an off-agenda informal "
+            "pattern (e.g. unscheduled break, private sidebar, pre-meeting chatter), return: "
+            "Shadow: <short descriptive label>\n"
+            "3. NOISE: Only if the window is truly unintelligible filler (silence, crosstalk, 'um', 'yeah' "
+            "only), return: Noise\n\n"
+            "CRITICAL GUIDANCE FOR COUNCIL MEETINGS:\n"
+            "- Citizens speaking on ANY topic during public comment = 'Public Comment' (formal)\n"
+            "- 'Come to order', opening statements = 'Call to Order'\n"
+            "- Reading out names of council members = 'Roll Call'\n"
+            "- Saying the Pledge = 'Pledge of Allegiance'\n"
+            "- Approving the meeting agenda = 'Approval of Agenda'\n"
+            "- Approving last meeting notes = 'Approval of Minutes'\n"
+            "- Department head giving an update = 'City Manager Report' or 'Finance Department Update'\n"
+            "- Council members reporting on their work = 'Council Member Reports'\n"
+            "- Hearing from the public on a specific ordinance = 'Open Public Hearing'\n"
+            "- Motion, second, vote on consent items = 'Approve Consent Agenda Items'\n"
+            "- Discussing a pending ordinance = 'Review Pending Ordinances'\n"
+            "- Introducing a new ordinance = 'Introduce New Ordinance'\n"
+            "- Budget discussion = 'Budget Amendments Discussion'\n"
+            "- Vote on resolution = 'Resolution for Capital Improvements'\n"
+            "- Contract vote = 'Contract Approval'\n"
+            "- City attorney speaking = 'City Attorney Report'\n"
+            "- Announcing future meetings = 'Scheduling and Announcements'\n"
+            "- Meeting closing = 'Adjourn Meeting'\n\n"
+            "EXAMPLES:\n"
+            "Events: citizens speaking about police accountability during public comment "
+            "-> Return: Public Comment\n"
+            "Events: 'move to approve', 'second the motion', 'all in favor' "
+            "-> Return: Approve Consent Agenda Items\n"
+            "Events: council president reading out council member names "
+            "-> Return: Roll Call\n"
+            "Events: city attorney discussing pending litigation "
+            "-> Return: City Attorney Report\n"
+            "Events: council member talking about a community event they attended "
+            "-> Return: Council Member Reports\n"
+            "Events: two council members whispering, off-mic chatter between agenda items "
+            "-> Return: Shadow: Informal Side Conversation\n"
+            "Events: 'um', 'yeah', 'okay', background noise only "
+            "-> Return: Noise\n\n"
+            "IMPORTANT: Return ONLY the label string. No explanation, no JSON, no quotes around it.\n\n"
+            "MEETING EVENTS TO CLASSIFY:\n"
             f"{window_events}"
         )
+
+    def _ollama_classify_window(self, model, agenda_tasks, window_events, timeout=60):
+        prompt = self._build_classification_prompt(agenda_tasks, window_events)
 
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a precise classification assistant for meeting events."},
+                {"role": "system", "content": "You are a precise meeting process analyst. Always respond with only the classification label."},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
@@ -99,26 +145,14 @@ class ComplianceEngine:
         if not api_key:
             return "Noise"
 
-        prompt = (
-            "You are abstracting micro-events from a meeting into higher-level activities.\n"
-            "Known formal agenda tasks:\n"
-            f"{agenda_tasks}\n\n"
-            "For these events, return ONE of:\n"
-            "- A matching formal agenda task\n"
-            "- A high-level \"Shadow Workflow\" label (recurrent informal pattern)\n"
-            "- \"Noise\" (discard)\n"
-            "If Shadow, use format: \"Shadow: <Label>\".\n"
-            "Return only the label.\n\n"
-            "Events:\n"
-            f"{window_events}"
-        )
+        prompt = self._build_classification_prompt(agenda_tasks, window_events)
 
         try:
             client = openai.OpenAI(api_key=api_key, timeout=timeout)
             response = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are a precise classification assistant for meeting events."},
+                    {"role": "system", "content": "You are a precise meeting process analyst. Always respond with only the classification label."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
@@ -136,8 +170,8 @@ class ComplianceEngine:
         shadow_min_ratio=0.15,
         model="mistral",
         overlap_ratio=0.5,
-        min_events_per_window=5,
-        min_label_support=2,
+        min_events_per_window=2,
+        min_label_support=1,
         api_key=None,
         openai_model="gpt-4o-mini",
         openai_timeout=60,
@@ -335,7 +369,7 @@ class ComplianceEngine:
             model=model,
         )
 
-    def map_events_to_agenda(self, video_events, agenda_activities, threshold=0.5):
+    def map_events_to_agenda(self, video_events, agenda_activities, threshold=0.35):
         """
         Map extracted video events to agenda activities using semantic similarity.
         
