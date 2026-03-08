@@ -1,6 +1,24 @@
 results
 study
+meetings
 __pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
+thesis
+
+# Large files
+*.mp4
+*.wav
+*.mp3
+*.avi
+*.mkv
+
+# Golden dataset (too large for GitHub)
+Golden-dataset/
+
+# Database files
+*.db
+
+# Batch output
+batch_output.log

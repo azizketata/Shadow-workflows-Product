@@ -468,7 +468,10 @@ class VideoProcessor:
             if progress_callback:
                 progress_callback(35, f"Loading local Whisper model ({model_size})...")
             self._log(f"Loading local Whisper model: {model_size}")
-            model = local_whisper.load_model(model_size)
+            import torch
+            _device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._log(f"Whisper device: {_device}")
+            model = local_whisper.load_model(model_size, device=_device)
 
             if progress_callback:
                 progress_callback(40, "Transcribing with local Whisper (this may take a while)...")
@@ -497,6 +500,14 @@ class VideoProcessor:
             self._log(f"Local Whisper error: {e}")
             print(f"[VideoProcessor] Local Whisper failed: {e}")
         finally:
+            # Free Whisper model from GPU memory
+            try:
+                del model
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
             if audio_path and os.path.exists(audio_path):
                 try:
                     os.remove(audio_path)
@@ -577,7 +588,8 @@ class VideoProcessor:
         Returns a combined list of visual event dicts.
         """
         events = []
-        cap = cv2.VideoCapture(video_path)
+        # Force FFMPEG backend — Windows MSMF hangs on VP9 codec videos
+        cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
 
         if not cap.isOpened():
             self._log("Error opening video file for visual processing")
@@ -606,11 +618,42 @@ class VideoProcessor:
         MOTION_DEBOUNCE = 10.0  # seconds between motion events
         MOG2_WARMUP_SEC = 15.0  # skip motion detection until MOG2 has enough history
 
+        import threading, time as _time
+        FRAME_READ_TIMEOUT = 30  # seconds — bail if a single read() takes this long
+
         frame_count = 0
+        consecutive_timeouts = 0
+        last_progress_pct = -1
         while cap.isOpened():
-            ret, frame = cap.read()
+            # Timeout-protected frame read to prevent VP9 decode hangs
+            read_result = [False, None]
+            def _read_frame():
+                read_result[0], read_result[1] = cap.read()
+            t = threading.Thread(target=_read_frame, daemon=True)
+            t.start()
+            t.join(timeout=FRAME_READ_TIMEOUT)
+            if t.is_alive():
+                consecutive_timeouts += 1
+                self._log(f"WARNING: frame read timeout at frame {frame_count} (attempt {consecutive_timeouts})")
+                if consecutive_timeouts >= 3:
+                    self._log(f"ERROR: 3 consecutive frame read timeouts — aborting visual processing at frame {frame_count}")
+                    break
+                # Skip ahead by seeking past the stuck frame
+                frame_count += sample_interval
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
+                continue
+
+            ret, frame = read_result
             if not ret:
                 break
+            consecutive_timeouts = 0
+
+            # Progress logging every 10%
+            if total_frames > 0:
+                pct = int(frame_count / total_frames * 100) // 10 * 10
+                if pct > last_progress_pct:
+                    last_progress_pct = pct
+                    self._log(f"Visual processing: {pct}% ({frame_count}/{int(total_frames)} frames, {len(events)} events so far)")
 
             if frame_count % sample_interval == 0:
                 current_seconds = frame_count / fps
@@ -947,7 +990,26 @@ class VideoProcessor:
         # 2. Process Visuals (rtmlib pose + OpenCV motion — degrades gracefully)
         _progress(70, "Analyzing visual gestures...")
         try:
-            visual_events = self.process_visuals(video_path)
+            import threading
+            vis_result = [None]
+            vis_error = [None]
+            def _run_visuals():
+                try:
+                    vis_result[0] = self.process_visuals(video_path)
+                except Exception as e:
+                    vis_error[0] = e
+            vis_thread = threading.Thread(target=_run_visuals, daemon=True)
+            vis_thread.start()
+            # Timeout: 20 min max for frame analysis
+            vis_thread.join(timeout=600)  # 10 min max
+            if vis_thread.is_alive():
+                self._log("WARNING: Visual processing timed out (10 min) — skipping")
+                print(f"[VideoProcessor] WARNING: visual processing timed out — skipping")
+                visual_events = []
+            elif vis_error[0]:
+                raise vis_error[0]
+            else:
+                visual_events = vis_result[0] or []
             self._log(f"Visual events count: {len(visual_events)}")
         except Exception as e:
             self._log(f"Visual processing failed (skipping): {e}")

@@ -1,0 +1,663 @@
+[
+  {
+    "golden_name": "Seattle-Council",
+    "pipeline_id": "seattle_2026-01-20",
+    "golden": {
+      "total_events": 1119,
+      "shadow_count": 845,
+      "formal_count": 274,
+      "shadow_pct": 0.7551,
+      "deviance_cats": {
+        "benign": 833,
+        "innovation": 11,
+        "disruption": 1
+      },
+      "agenda_items_covered": [
+        "1. CB 121022",
+        "1. Min 551 January 13, 2026",
+        "2. CB 121154",
+        "A. Bell\u2019s Second Addition, in the Denny Triangle neighborhood;",
+        "A. CALL TO ORDER",
+        "B. ROLL CALL",
+        "C. PRESENTATIONS",
+        "D. PUBLIC COMMENT",
+        "E. ADOPTION OF INTRODUCTION AND REFERRAL CALENDAR:",
+        "F. APPROVAL OF THE AGENDA",
+        "G. APPROVAL OF CONSENT CALENDAR",
+        "H. COMMITTEE REPORTS",
+        "I. ITEMS REMOVED FROM CONSENT CALENDAR",
+        "J. ADOPTION OF OTHER RESOLUTIONS",
+        "K. OTHER BUSINESS",
+        "L. ADJOURNMENT"
+      ],
+      "agenda_coverage_count": 16,
+      "meeting_type": "formal_session",
+      "has_formal_agenda": "yes",
+      "formality": "low",
+      "estimated_formal_pct": 24.5,
+      "estimated_shadow_pct": 75.5,
+      "roberts_rules": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "agenda_order_followed": "partially"
+    },
+    "pipeline": {
+      "total_events": 9,
+      "shadow_count": 4,
+      "formal_count": 5,
+      "shadow_pct": 0.444,
+      "dedup_fitness": 0.0,
+      "raw_fitness": 0.0,
+      "match_rate": 0.5556,
+      "agenda_coverage_pct": 0.125,
+      "agenda_coverage_count": 2,
+      "declare_score": 41.2,
+      "declare_grade": "F",
+      "deviance": {
+        "benign": 0,
+        "innovation": 5,
+        "disruption": 0,
+        "efficiency": 0
+      },
+      "powl_clusters": 4
+    },
+    "shadow_comparison": {
+      "golden_shadow_pct": 0.7551,
+      "pipeline_shadow_pct": 0.444,
+      "golden_shadow_count": 845,
+      "pipeline_shadow_count": 4,
+      "golden_total": 1119,
+      "pipeline_total": 9,
+      "agreement_direction": "disagree"
+    },
+    "roberts_comparison": {
+      "golden_roberts_checks": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "golden_roberts_score": 0.5,
+      "pipeline_declare_grade": "F",
+      "pipeline_declare_score": 41.2
+    }
+  },
+  {
+    "golden_name": "Seattle-Council-012726",
+    "pipeline_id": "seattle_2026-01-27",
+    "golden": {
+      "total_events": 958,
+      "shadow_count": 678,
+      "formal_count": 280,
+      "shadow_pct": 0.7077,
+      "deviance_cats": {
+        "benign": 671,
+        "innovation": 6,
+        "disruption": 1
+      },
+      "agenda_items_covered": [
+        "1. Min 552 January 20, 2026",
+        "A. CALL TO ORDER",
+        "B. ROLL CALL",
+        "C. PRESENTATIONS",
+        "D. PUBLIC COMMENT",
+        "E. ADOPTION OF INTRODUCTION AND REFERRAL CALENDAR:",
+        "F. APPROVAL OF THE AGENDA",
+        "G. APPROVAL OF CONSENT CALENDAR",
+        "H. COMMITTEE REPORTS",
+        "I. ITEMS REMOVED FROM CONSENT CALENDAR",
+        "J. ADOPTION OF OTHER RESOLUTIONS",
+        "K. OTHER BUSINESS",
+        "L. ADJOURNMENT"
+      ],
+      "agenda_coverage_count": 13,
+      "meeting_type": "formal_session",
+      "has_formal_agenda": "yes",
+      "formality": "medium",
+      "estimated_formal_pct": 29.2,
+      "estimated_shadow_pct": 70.8,
+      "roberts_rules": {
+        "call_to_order": false,
+        "roll_call": true,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "agenda_order_followed": "partially"
+    },
+    "pipeline": {
+      "total_events": 85,
+      "shadow_count": 57,
+      "formal_count": 28,
+      "shadow_pct": 0.671,
+      "dedup_fitness": 0.3333,
+      "raw_fitness": 0.1,
+      "match_rate": 0.3294,
+      "agenda_coverage_pct": 0.6154,
+      "agenda_coverage_count": 8,
+      "declare_score": 100.0,
+      "declare_grade": "A",
+      "deviance": {
+        "benign": 0,
+        "innovation": 64,
+        "disruption": 1,
+        "efficiency": 0
+      },
+      "powl_clusters": 20
+    },
+    "shadow_comparison": {
+      "golden_shadow_pct": 0.7077,
+      "pipeline_shadow_pct": 0.671,
+      "golden_shadow_count": 678,
+      "pipeline_shadow_count": 57,
+      "golden_total": 958,
+      "pipeline_total": 85,
+      "agreement_direction": "both_high"
+    },
+    "roberts_comparison": {
+      "golden_roberts_checks": {
+        "call_to_order": false,
+        "roll_call": true,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "golden_roberts_score": 0.667,
+      "pipeline_declare_grade": "A",
+      "pipeline_declare_score": 100.0
+    }
+  },
+  {
+    "golden_name": "Seattle-Council-020326",
+    "pipeline_id": "seattle_2026-02-03",
+    "golden": {
+      "total_events": 1231,
+      "shadow_count": 898,
+      "formal_count": 333,
+      "shadow_pct": 0.7295,
+      "deviance_cats": {
+        "benign": 891,
+        "innovation": 6,
+        "disruption": 1
+      },
+      "agenda_items_covered": [
+        "1. Min 553 January 27, 2026",
+        "2. CB 121157",
+        "A. CALL TO ORDER",
+        "B. ROLL CALL",
+        "C. PRESENTATIONS",
+        "D. PUBLIC COMMENT",
+        "E. ADOPTION OF INTRODUCTION AND REFERRAL CALENDAR:",
+        "F. APPROVAL OF THE AGENDA",
+        "G. APPROVAL OF CONSENT CALENDAR",
+        "H. COMMITTEE REPORTS",
+        "I. ITEMS REMOVED FROM CONSENT CALENDAR",
+        "J. ADOPTION OF OTHER RESOLUTIONS",
+        "K. OTHER BUSINESS",
+        "L. ADJOURNMENT"
+      ],
+      "agenda_coverage_count": 14,
+      "meeting_type": "formal_session",
+      "has_formal_agenda": "yes",
+      "formality": "low",
+      "estimated_formal_pct": 27.1,
+      "estimated_shadow_pct": 72.9,
+      "roberts_rules": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "agenda_order_followed": "partially"
+    },
+    "pipeline": {
+      "total_events": 1,
+      "shadow_count": 1,
+      "formal_count": 0,
+      "shadow_pct": 1.0,
+      "dedup_fitness": 0.0,
+      "raw_fitness": 0.0,
+      "match_rate": 0.0,
+      "agenda_coverage_pct": 0.0,
+      "agenda_coverage_count": 0,
+      "declare_score": 41.2,
+      "declare_grade": "F",
+      "deviance": {
+        "benign": 0,
+        "innovation": 1,
+        "disruption": 0,
+        "efficiency": 0
+      },
+      "powl_clusters": 1
+    },
+    "shadow_comparison": {
+      "golden_shadow_pct": 0.7295,
+      "pipeline_shadow_pct": 1.0,
+      "golden_shadow_count": 898,
+      "pipeline_shadow_count": 1,
+      "golden_total": 1231,
+      "pipeline_total": 1,
+      "agreement_direction": "both_high"
+    },
+    "roberts_comparison": {
+      "golden_roberts_checks": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "golden_roberts_score": 0.5,
+      "pipeline_declare_grade": "F",
+      "pipeline_declare_score": 41.2
+    }
+  },
+  {
+    "golden_name": "Seattle-brief",
+    "pipeline_id": "seattle_2026-01-26",
+    "golden": {
+      "total_events": 594,
+      "shadow_count": 515,
+      "formal_count": 79,
+      "shadow_pct": 0.867,
+      "deviance_cats": {
+        "benign": 509,
+        "innovation": 6
+      },
+      "agenda_items_covered": [
+        "1. Approval of the Minutes",
+        "2. President's Report",
+        "3. State Legislative Session Update (2026)",
+        "4. Signing of Letters and Proclamations",
+        "5. Preview of City Council Actions, Council and Regional Committees",
+        "6. Executive Session I on Pending, Potential, or Actual Litigation*",
+        "8. Executive Session III on Pending, Potential, or Actual Litigation*"
+      ],
+      "agenda_coverage_count": 7,
+      "meeting_type": "work_session",
+      "has_formal_agenda": "yes",
+      "formality": "medium",
+      "estimated_formal_pct": 13.3,
+      "estimated_shadow_pct": 86.7,
+      "roberts_rules": {
+        "call_to_order": false,
+        "roll_call": true,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": false
+      },
+      "agenda_order_followed": "partially"
+    },
+    "pipeline": {
+      "total_events": 125,
+      "shadow_count": 72,
+      "formal_count": 53,
+      "shadow_pct": 0.576,
+      "dedup_fitness": 0.3636,
+      "raw_fitness": 0.375,
+      "match_rate": 0.424,
+      "agenda_coverage_pct": 0.7692,
+      "agenda_coverage_count": 10,
+      "declare_score": 100.0,
+      "declare_grade": "A",
+      "deviance": {
+        "benign": 1,
+        "innovation": 109,
+        "disruption": 0,
+        "efficiency": 0
+      },
+      "powl_clusters": 27
+    },
+    "shadow_comparison": {
+      "golden_shadow_pct": 0.867,
+      "pipeline_shadow_pct": 0.576,
+      "golden_shadow_count": 515,
+      "pipeline_shadow_count": 72,
+      "golden_total": 594,
+      "pipeline_total": 125,
+      "agreement_direction": "both_high"
+    },
+    "roberts_comparison": {
+      "golden_roberts_checks": {
+        "call_to_order": false,
+        "roll_call": true,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": false
+      },
+      "golden_roberts_score": 0.5,
+      "pipeline_declare_grade": "A",
+      "pipeline_declare_score": 100.0
+    }
+  },
+  {
+    "golden_name": "Seattle-brief-feb",
+    "pipeline_id": "seattle_2026-02-02",
+    "golden": {
+      "total_events": 910,
+      "shadow_count": 840,
+      "formal_count": 70,
+      "shadow_pct": 0.9231,
+      "deviance_cats": {
+        "benign": 813,
+        "innovation": 26,
+        "disruption": 1
+      },
+      "agenda_items_covered": [
+        "1. Approval of the Minutes",
+        "2. President's Report",
+        "3. Signing of Letters and Proclamations",
+        "4. Preview of City Council Actions, Council and Regional Committees"
+      ],
+      "agenda_coverage_count": 4,
+      "meeting_type": "work_session",
+      "has_formal_agenda": "yes",
+      "formality": "medium",
+      "estimated_formal_pct": 7.7,
+      "estimated_shadow_pct": 92.3,
+      "roberts_rules": {
+        "call_to_order": false,
+        "roll_call": true,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "agenda_order_followed": "partially"
+    },
+    "pipeline": {
+      "total_events": 1,
+      "shadow_count": 1,
+      "formal_count": 0,
+      "shadow_pct": 1.0,
+      "dedup_fitness": 0.0,
+      "raw_fitness": 0.0,
+      "match_rate": 0.0,
+      "agenda_coverage_pct": 0.0,
+      "agenda_coverage_count": 0,
+      "declare_score": 41.2,
+      "declare_grade": "F",
+      "deviance": {
+        "benign": 0,
+        "innovation": 1,
+        "disruption": 0,
+        "efficiency": 0
+      },
+      "powl_clusters": 1
+    },
+    "shadow_comparison": {
+      "golden_shadow_pct": 0.9231,
+      "pipeline_shadow_pct": 1.0,
+      "golden_shadow_count": 840,
+      "pipeline_shadow_count": 1,
+      "golden_total": 910,
+      "pipeline_total": 1,
+      "agreement_direction": "both_high"
+    },
+    "roberts_comparison": {
+      "golden_roberts_checks": {
+        "call_to_order": false,
+        "roll_call": true,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "golden_roberts_score": 0.667,
+      "pipeline_declare_grade": "F",
+      "pipeline_declare_score": 41.2
+    }
+  },
+  {
+    "golden_name": "Seattle-finance",
+    "pipeline_id": "seattle_2026-02-09",
+    "golden": {
+      "total_events": 682,
+      "shadow_count": 526,
+      "formal_count": 156,
+      "shadow_pct": 0.7713,
+      "deviance_cats": {
+        "benign": 508,
+        "innovation": 18
+      },
+      "agenda_items_covered": [
+        "1. Appt 03442",
+        "2. CB 121153",
+        "A. Call To Order",
+        "B. Approval of the Agenda",
+        "C. Public Comment",
+        "D. Items of Business",
+        "E. Adjournment"
+      ],
+      "agenda_coverage_count": 7,
+      "meeting_type": "work_session",
+      "has_formal_agenda": "yes",
+      "formality": "low",
+      "estimated_formal_pct": 22.9,
+      "estimated_shadow_pct": 77.1,
+      "roberts_rules": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": true,
+        "votes_after_motion": false,
+        "public_comment": true
+      },
+      "agenda_order_followed": "partially"
+    },
+    "pipeline": {
+      "total_events": 114,
+      "shadow_count": 49,
+      "formal_count": 65,
+      "shadow_pct": 0.43,
+      "dedup_fitness": 0.5333,
+      "raw_fitness": 0.2667,
+      "match_rate": 0.5702,
+      "agenda_coverage_pct": 0.7778,
+      "agenda_coverage_count": 14,
+      "declare_score": 100.0,
+      "declare_grade": "A",
+      "deviance": {
+        "benign": 5,
+        "innovation": 83,
+        "disruption": 0,
+        "efficiency": 0
+      },
+      "powl_clusters": 18
+    },
+    "shadow_comparison": {
+      "golden_shadow_pct": 0.7713,
+      "pipeline_shadow_pct": 0.43,
+      "golden_shadow_count": 526,
+      "pipeline_shadow_count": 49,
+      "golden_total": 682,
+      "pipeline_total": 114,
+      "agreement_direction": "disagree"
+    },
+    "roberts_comparison": {
+      "golden_roberts_checks": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": true,
+        "votes_after_motion": false,
+        "public_comment": true
+      },
+      "golden_roberts_score": 0.5,
+      "pipeline_declare_grade": "A",
+      "pipeline_declare_score": 100.0
+    }
+  },
+  {
+    "golden_name": "Seattle-hous",
+    "pipeline_id": "seattle_2026-01-28",
+    "golden": {
+      "total_events": 512,
+      "shadow_count": 427,
+      "formal_count": 85,
+      "shadow_pct": 0.834,
+      "deviance_cats": {
+        "benign": 422,
+        "innovation": 5
+      },
+      "agenda_items_covered": [
+        "1. Introduction to Seattle Office of Arts and Culture",
+        "A. Call To Order",
+        "B. Approval of the Agenda",
+        "C. Public Comment",
+        "D. Items of Business",
+        "E. Adjournment"
+      ],
+      "agenda_coverage_count": 6,
+      "meeting_type": "work_session",
+      "has_formal_agenda": "yes",
+      "formality": "low",
+      "estimated_formal_pct": 16.6,
+      "estimated_shadow_pct": 83.4,
+      "roberts_rules": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": false,
+        "public_comment": true
+      },
+      "agenda_order_followed": "partially"
+    },
+    "pipeline": {
+      "total_events": 102,
+      "shadow_count": 77,
+      "formal_count": 25,
+      "shadow_pct": 0.755,
+      "dedup_fitness": 0.4444,
+      "raw_fitness": 0.3333,
+      "match_rate": 0.2451,
+      "agenda_coverage_pct": 0.6154,
+      "agenda_coverage_count": 8,
+      "declare_score": 100.0,
+      "declare_grade": "A",
+      "deviance": {
+        "benign": 4,
+        "innovation": 88,
+        "disruption": 0,
+        "efficiency": 0
+      },
+      "powl_clusters": 18
+    },
+    "shadow_comparison": {
+      "golden_shadow_pct": 0.834,
+      "pipeline_shadow_pct": 0.755,
+      "golden_shadow_count": 427,
+      "pipeline_shadow_count": 77,
+      "golden_total": 512,
+      "pipeline_total": 102,
+      "agreement_direction": "both_high"
+    },
+    "roberts_comparison": {
+      "golden_roberts_checks": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": false,
+        "public_comment": true
+      },
+      "golden_roberts_score": 0.333,
+      "pipeline_declare_grade": "A",
+      "pipeline_declare_score": 100.0
+    }
+  },
+  {
+    "golden_name": "Seattle-lib",
+    "pipeline_id": "seattle_2026-01-28",
+    "golden": {
+      "total_events": 1075,
+      "shadow_count": 896,
+      "formal_count": 179,
+      "shadow_pct": 0.8335,
+      "deviance_cats": {
+        "benign": 870,
+        "innovation": 26
+      },
+      "agenda_items_covered": [
+        "1. OIRA: Supporting Seattle\u2019s Immigrant and Refugee Communities",
+        "A. Call To Order",
+        "B. Approval of the Agenda",
+        "C. Public Comment",
+        "D. Items of Business",
+        "E. Adjournment"
+      ],
+      "agenda_coverage_count": 6,
+      "meeting_type": "work_session",
+      "has_formal_agenda": "yes",
+      "formality": "low",
+      "estimated_formal_pct": 16.7,
+      "estimated_shadow_pct": 83.3,
+      "roberts_rules": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "agenda_order_followed": "partially"
+    },
+    "pipeline": {
+      "total_events": 102,
+      "shadow_count": 77,
+      "formal_count": 25,
+      "shadow_pct": 0.755,
+      "dedup_fitness": 0.4444,
+      "raw_fitness": 0.3333,
+      "match_rate": 0.2451,
+      "agenda_coverage_pct": 0.6154,
+      "agenda_coverage_count": 8,
+      "declare_score": 100.0,
+      "declare_grade": "A",
+      "deviance": {
+        "benign": 4,
+        "innovation": 88,
+        "disruption": 0,
+        "efficiency": 0
+      },
+      "powl_clusters": 18
+    },
+    "shadow_comparison": {
+      "golden_shadow_pct": 0.8335,
+      "pipeline_shadow_pct": 0.755,
+      "golden_shadow_count": 896,
+      "pipeline_shadow_count": 77,
+      "golden_total": 1075,
+      "pipeline_total": 102,
+      "agreement_direction": "both_high"
+    },
+    "roberts_comparison": {
+      "golden_roberts_checks": {
+        "call_to_order": false,
+        "roll_call": false,
+        "adjournment": true,
+        "motions_seconded": false,
+        "votes_after_motion": true,
+        "public_comment": true
+      },
+      "golden_roberts_score": 0.5,
+      "pipeline_declare_grade": "A",
+      "pipeline_declare_score": 100.0
+    }
+  }
+]
