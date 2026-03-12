@@ -33,16 +33,22 @@ class VideoProcessor:
         # --- Pose detection via rtmlib (replaces MediaPipe) ---
         self.body_detector = None
         if _RTMLIB_AVAILABLE:
-            try:
-                self.body_detector = Body(
-                    mode='lightweight',
-                    backend='onnxruntime',
-                    device='cpu',
-                )
-                self._log("rtmlib Body detector initialized (RTMPose lightweight, ONNX)")
-            except Exception as e:
-                self._log(f"rtmlib init failed: {e}")
-                self.body_detector = None
+            # Try GPU first, fall back to CPU
+            for _device in ('cuda', 'cpu'):
+                try:
+                    self.body_detector = Body(
+                        mode='lightweight',
+                        backend='onnxruntime',
+                        device=_device,
+                    )
+                    self._log(f"rtmlib Body detector initialized (RTMPose lightweight, ONNX, {_device})")
+                    break
+                except Exception as e:
+                    if _device == 'cuda':
+                        self._log(f"CUDA init failed, falling back to CPU: {e}")
+                    else:
+                        self._log(f"rtmlib init failed: {e}")
+                        self.body_detector = None
         else:
             self._log("rtmlib not available — pose detection disabled")
 
@@ -618,71 +624,58 @@ class VideoProcessor:
         MOTION_DEBOUNCE = 10.0  # seconds between motion events
         MOG2_WARMUP_SEC = 15.0  # skip motion detection until MOG2 has enough history
 
-        import threading, time as _time
-        FRAME_READ_TIMEOUT = 30  # seconds — bail if a single read() takes this long
+        import time as _time
+        _visual_start_time = _time.time()
 
-        frame_count = 0
-        consecutive_timeouts = 0
         last_progress_pct = -1
-        while cap.isOpened():
-            # Timeout-protected frame read to prevent VP9 decode hangs
-            read_result = [False, None]
-            def _read_frame():
-                read_result[0], read_result[1] = cap.read()
-            t = threading.Thread(target=_read_frame, daemon=True)
-            t.start()
-            t.join(timeout=FRAME_READ_TIMEOUT)
-            if t.is_alive():
-                consecutive_timeouts += 1
-                self._log(f"WARNING: frame read timeout at frame {frame_count} (attempt {consecutive_timeouts})")
-                if consecutive_timeouts >= 3:
-                    self._log(f"ERROR: 3 consecutive frame read timeouts — aborting visual processing at frame {frame_count}")
-                    break
-                # Skip ahead by seeking past the stuck frame
-                frame_count += sample_interval
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
-                continue
+        total_samples = int(total_frames / sample_interval) if sample_interval > 0 else 0
+        self._log(f"Starting frame loop: {int(total_frames)} total frames, {total_samples} samples (every {sample_interval} frames)")
 
-            ret, frame = read_result
-            if not ret:
+        # Seek-based sampling: jump directly to sample frames instead of reading every frame
+        for sample_idx in range(total_samples + 1):
+            frame_num = sample_idx * sample_interval
+            if frame_num >= total_frames:
                 break
-            consecutive_timeouts = 0
+            current_seconds = frame_num / fps
 
-            # Progress logging every 10%
-            if total_frames > 0:
-                pct = int(frame_count / total_frames * 100) // 10 * 10
+            # Progress logging every 5%
+            if total_samples > 0:
+                pct = int(sample_idx / total_samples * 100) // 5 * 5
                 if pct > last_progress_pct:
                     last_progress_pct = pct
-                    self._log(f"Visual processing: {pct}% ({frame_count}/{int(total_frames)} frames, {len(events)} events so far)")
+                    elapsed_vis = _time.time() - _visual_start_time
+                    self._log(f"Visual processing: {pct}% (sample {sample_idx}/{total_samples}, {current_seconds:.0f}s/{total_duration_s:.0f}s, {len(events)} events, {elapsed_vis:.0f}s elapsed)")
 
-            if frame_count % sample_interval == 0:
-                current_seconds = frame_count / fps
+            # Seek to the target frame and read
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = cap.read()
+            if not ret:
+                self._log(f"Frame read failed at sample {sample_idx} (frame {frame_num}) — stopping")
+                break
 
-                # Feed frame to MOG2 for background model warmup (even when not emitting events)
-                if current_seconds < MOG2_WARMUP_SEC:
-                    try:
-                        small = cv2.resize(frame, (320, 240))
-                        self.bg_subtractor.apply(small)
-                    except Exception:
-                        pass
+            # Feed frame to MOG2 for background model warmup (even when not emitting events)
+            if current_seconds < MOG2_WARMUP_SEC:
+                try:
+                    small = cv2.resize(frame, (320, 240))
+                    self.bg_subtractor.apply(small)
+                except Exception:
+                    pass
 
-                # --- Pose detection (hand raises) ---
-                pose_event = self._detect_pose_events(
-                    frame, current_seconds, last_pose_event_sec, POSE_DEBOUNCE
-                )
-                if pose_event:
-                    events.append(pose_event)
-                    last_pose_event_sec = current_seconds
+            # --- Pose detection (hand raises, standing, formal objection) ---
+            pose_events = self._detect_pose_events(
+                frame, current_seconds, last_pose_event_sec, POSE_DEBOUNCE
+            )
+            if pose_events:
+                events.extend(pose_events)
+                last_pose_event_sec = current_seconds
 
-                # --- Motion detection (speaker activity) ---
-                motion_event = self._detect_motion_events(
-                    frame, current_seconds, last_motion_event_sec, MOTION_DEBOUNCE
-                )
-                if motion_event:
-                    events.append(motion_event)
-                    last_motion_event_sec = current_seconds
-
-            frame_count += 1
+            # --- Motion detection (speaker activity) ---
+            motion_event = self._detect_motion_events(
+                frame, current_seconds, last_motion_event_sec, MOTION_DEBOUNCE
+            )
+            if motion_event:
+                events.append(motion_event)
+                last_motion_event_sec = current_seconds
 
         cap.release()
         self._log(f"Visual processing complete: {len(events)} events")
@@ -690,11 +683,10 @@ class VideoProcessor:
 
     def _detect_pose_events(self, frame, current_seconds, last_event_sec, debounce):
         """
-        Detect hand-raise gestures using rtmlib RTMPose.
-        COCO-17 keypoints: 0=nose, 5/6=shoulders, 9/10=wrists
-        Hand raised = wrist Y < nose Y AND wrist Y < shoulder Y - margin.
-        Counts ALL detected persons with raised hands (multi-person voting).
-        Returns an event dict or None.
+        Detect parliamentary gestures using rtmlib RTMPose (COCO-17 keypoints).
+        Detects: hand raises (voting), both hands raised (formal objection),
+        group votes (multiple persons), and standing (speaker change).
+        Returns a list of event dicts, or None.
         """
         if self.body_detector is None:
             return None
@@ -713,8 +705,12 @@ class VideoProcessor:
             return None
 
         MIN_KP_CONF = 0.3
-        SHOULDER_MARGIN = 30  # pixels above shoulder to count as "raised"
-        hands_raised = 0
+        SHOULDER_MARGIN = 30   # pixels above shoulder to count as "raised"
+        STANDING_MIN_DIST = 150  # pixels, hip-to-ankle vertical distance
+
+        single_hand_persons = 0
+        both_hands_persons = 0
+        standing_persons = 0
 
         for person_idx in range(len(keypoints)):
             kp = keypoints[person_idx]   # shape (17, 2) — x, y
@@ -726,37 +722,91 @@ class VideoProcessor:
             lshoulder_y, lshoulder_conf = kp[5][1], sc[5]
             rshoulder_y, rshoulder_conf = kp[6][1], sc[6]
 
-            if nose_conf < MIN_KP_CONF:
-                continue
+            # --- Hand raise detection ---
+            if nose_conf >= MIN_KP_CONF:
+                left_raised = (
+                    lwrist_conf > MIN_KP_CONF
+                    and lshoulder_conf > MIN_KP_CONF
+                    and lwrist_y < nose_y
+                    and lwrist_y < (lshoulder_y - SHOULDER_MARGIN)
+                )
+                right_raised = (
+                    rwrist_conf > MIN_KP_CONF
+                    and rshoulder_conf > MIN_KP_CONF
+                    and rwrist_y < nose_y
+                    and rwrist_y < (rshoulder_y - SHOULDER_MARGIN)
+                )
 
-            left_raised = (
-                lwrist_conf > MIN_KP_CONF
-                and lshoulder_conf > MIN_KP_CONF
-                and lwrist_y < nose_y
-                and lwrist_y < (lshoulder_y - SHOULDER_MARGIN)
-            )
-            right_raised = (
-                rwrist_conf > MIN_KP_CONF
-                and rshoulder_conf > MIN_KP_CONF
-                and rwrist_y < nose_y
-                and rwrist_y < (rshoulder_y - SHOULDER_MARGIN)
-            )
+                if left_raised and right_raised:
+                    both_hands_persons += 1
+                elif left_raised or right_raised:
+                    single_hand_persons += 1
 
-            if left_raised or right_raised:
-                hands_raised += 1
+            # --- Standing detection (hip-to-ankle vertical distance) ---
+            lhip_y, lhip_conf = kp[11][1], sc[11]
+            rhip_y, rhip_conf = kp[12][1], sc[12]
+            lankle_y, lankle_conf = kp[15][1], sc[15]
+            rankle_y, rankle_conf = kp[16][1], sc[16]
 
-        if hands_raised == 0:
-            return None
+            hip_y = None
+            if lhip_conf > MIN_KP_CONF and rhip_conf > MIN_KP_CONF:
+                hip_y = (lhip_y + rhip_y) / 2
+            elif lhip_conf > MIN_KP_CONF:
+                hip_y = lhip_y
+            elif rhip_conf > MIN_KP_CONF:
+                hip_y = rhip_y
 
-        activity = "Voting" if hands_raised == 1 else f"Voting ({hands_raised} hands)"
-        return {
-            'timestamp': self._format_timestamp(current_seconds),
-            'activity_name': activity,
-            'source': 'Video',
-            'details': f'Hand Raised (RTMPose) - {hands_raised} person(s)',
-            'raw_seconds': current_seconds,
-            'hands_count': hands_raised,
-        }
+            ankle_y = None
+            if lankle_conf > MIN_KP_CONF and rankle_conf > MIN_KP_CONF:
+                ankle_y = (lankle_y + rankle_y) / 2
+            elif lankle_conf > MIN_KP_CONF:
+                ankle_y = lankle_y
+            elif rankle_conf > MIN_KP_CONF:
+                ankle_y = rankle_y
+
+            if hip_y is not None and ankle_y is not None:
+                if (ankle_y - hip_y) > STANDING_MIN_DIST:
+                    standing_persons += 1
+
+        # --- Build event list ---
+        events = []
+        ts = self._format_timestamp(current_seconds)
+
+        if both_hands_persons > 0:
+            events.append({
+                'timestamp': ts,
+                'activity_name': 'Formal Objection',
+                'source': 'Video',
+                'details': f'Both hands raised (RTMPose) - {both_hands_persons} person(s)',
+                'raw_seconds': current_seconds,
+            })
+
+        total_hands = single_hand_persons + both_hands_persons
+        if single_hand_persons > 0:
+            if total_hands > 1:
+                activity = f"Group Vote ({total_hands} hands)"
+            else:
+                activity = "Voting"
+            events.append({
+                'timestamp': ts,
+                'activity_name': activity,
+                'source': 'Video',
+                'details': f'Hand Raised (RTMPose) - {total_hands} person(s)',
+                'raw_seconds': current_seconds,
+                'hands_count': total_hands,
+            })
+
+        if standing_persons > 0:
+            activity = "Standing" if standing_persons == 1 else f"Standing ({standing_persons} persons)"
+            events.append({
+                'timestamp': ts,
+                'activity_name': activity,
+                'source': 'Video',
+                'details': f'Standing detected (RTMPose) - {standing_persons} person(s)',
+                'raw_seconds': current_seconds,
+            })
+
+        return events if events else None
 
     def _detect_motion_events(self, frame, current_seconds, last_event_sec, debounce):
         """
@@ -840,7 +890,7 @@ class VideoProcessor:
         used_visual_indices = set()
 
         # Separate visual events by type for targeted matching
-        voting_mask = df_visual['activity_name'].str.contains('Voting', na=False)
+        voting_mask = df_visual['activity_name'].str.contains('Voting|Group Vote|Formal Objection', na=False)
         motion_mask = df_visual['activity_name'] == 'Speaker Activity'
         df_voting = df_visual[voting_mask]
         df_motion = df_visual[motion_mask]

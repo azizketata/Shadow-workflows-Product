@@ -254,6 +254,109 @@ def run_layer2(
     }
 
 
+def run_layer2_visuals_only(
+    meeting: dict,
+    api_key: str,
+    debug: bool = False,
+) -> dict:
+    """Re-run only visual processing, keeping audio events from existing raw_events.csv.
+
+    This avoids re-transcribing with Whisper (~60% of processing time) while
+    picking up new gesture detections (standing, formal objection, group vote).
+    """
+    video_path = os.path.join(meeting["path"], "video.mp4")
+    raw_csv = os.path.join(meeting["path"], "raw_events.csv")
+
+    # Load existing events and extract audio-only events
+    df_existing = pd.read_csv(raw_csv)
+    audio_sources = {"Audio", "NLP"}
+    audio_events_df = df_existing[df_existing["source"].isin(audio_sources)]
+    audio_events = audio_events_df.to_dict("records")
+    # Reconstruct raw_seconds from timestamp
+    for evt in audio_events:
+        evt["raw_seconds"] = ts_to_seconds(str(evt.get("timestamp", "00:00:00")))
+
+    t0 = time.time()
+    print(f"    [visuals-only] Starting visual reprocessing: {video_path}")
+    print(f"    [visuals-only] Audio events retained: {len(audio_events)}")
+    processor = VideoProcessor(api_key or "local", debug=True)
+
+    # Re-run visual processing with new detections
+    print(f"    [visuals-only] Running RTMPose + MOG2 on video frames...")
+    visual_events = processor.process_visuals(video_path)
+    print(f"    [visuals-only] Visual events detected: {len(visual_events)} ({time.time() - t0:.0f}s elapsed)")
+    visual_events = processor._link_visual_to_nearest_audio(visual_events, audio_events)
+
+    # Re-fuse audio + new visual events
+    print(f"    [visuals-only] Fusing audio + visual events...")
+    fused_list = processor.fuse_events(audio_events, visual_events)
+    fused_list = processor._cluster_events(fused_list, gap_seconds=5)
+    print(f"    [visuals-only] Fused total: {len(fused_list)} events ({time.time() - t0:.0f}s elapsed)")
+
+    # Free GPU/ONNX memory aggressively
+    if hasattr(processor, 'body_detector') and processor.body_detector is not None:
+        # Release ONNX Runtime sessions inside rtmlib Body detector
+        if hasattr(processor.body_detector, 'det_model'):
+            del processor.body_detector.det_model
+        if hasattr(processor.body_detector, 'pose_model'):
+            del processor.body_detector.pose_model
+        del processor.body_detector
+    del processor
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    elapsed = time.time() - t0
+
+    if not fused_list:
+        df_raw = pd.DataFrame(columns=["timestamp", "activity_name", "source", "details"])
+    else:
+        df_raw = pd.DataFrame(fused_list)
+        df_raw = df_raw.sort_values(by="raw_seconds").drop(
+            columns=["raw_seconds"], errors="ignore"
+        ).reset_index(drop=True)
+
+    # Overwrite raw_events.csv
+    df_raw.to_csv(raw_csv, index=False)
+
+    # Source distribution
+    source_dist = compute_source_distribution(df_raw)
+    with open(os.path.join(meeting["path"], "source_distribution.json"), "w") as f:
+        json.dump(source_dist, f, indent=2)
+
+    # Extraction config
+    config = {
+        "rerun_visuals_only": True,
+        "raw_event_count": len(df_raw),
+        "processing_time_seconds": round(elapsed, 1),
+        "processed_at": datetime.now().isoformat(),
+    }
+    with open(os.path.join(meeting["path"], "extraction_config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+
+    # Estimate duration from last event timestamp
+    duration_s = 0
+    if "timestamp" in df_raw.columns and len(df_raw) > 0:
+        try:
+            duration_s = int(ts_to_seconds(str(df_raw["timestamp"].iloc[-1])))
+        except Exception:
+            pass
+
+    print(f"    Layer 2 (visuals-only): {len(df_raw)} events ({len(visual_events)} visual) in {elapsed:.0f}s")
+    return {
+        "df_raw": df_raw,
+        "raw_event_count": len(df_raw),
+        "source_distribution": source_dist,
+        "duration_seconds": duration_s,
+        "elapsed_seconds": elapsed,
+    }
+
+
 # ============================================================
 # Layer 3: LLM Abstraction + SBERT Mapping
 # ============================================================
@@ -653,8 +756,14 @@ def process_single_meeting(
 
     status = check_layer_status(meeting["path"])
 
-    # Early return if all layers are already complete
-    if status["layer4_done"] and not getattr(args, 'force_layer4', False):
+    # --rerun-visuals implies force layer3 + layer4 (raw events changed)
+    rerun_visuals = getattr(args, 'rerun_visuals', False)
+    if rerun_visuals:
+        args.force_layer3 = True
+        args.force_layer4 = True
+
+    # Early return if all layers are already complete (unless rerunning)
+    if status["layer4_done"] and not getattr(args, 'force_layer4', False) and not rerun_visuals:
         print("  All layers complete — skipping")
         conf_path = os.path.join(meeting["path"], "conformance.json")
         with open(conf_path) as f:
@@ -679,7 +788,32 @@ def process_single_meeting(
         extraction_info = {}
         df_raw = None
 
-        if status["layer2_done"]:
+        if rerun_visuals and meeting["has_video"] and status["layer2_done"]:
+            # Check if already reprocessed (has new gesture types)
+            raw_csv_check = os.path.join(meeting["path"], "raw_events.csv")
+            _df_check = pd.read_csv(raw_csv_check)
+            _has_new = _df_check["activity_name"].str.contains("Standing", na=False).any()
+            if _has_new and status["layer4_done"]:
+                print(f"  Already fully reprocessed (has Standing events + layer4 done) — skipping")
+                conf_path = os.path.join(meeting["path"], "conformance.json")
+                with open(conf_path) as f:
+                    return json.load(f)
+            elif _has_new:
+                print(f"  Layer 2: already reprocessed (has Standing events), skipping visual rerun")
+                df_raw = _df_check
+            else:
+                # Re-run visuals only: keep audio events, re-detect gestures, re-fuse
+                extraction_info = run_layer2_visuals_only(
+                    meeting, args.api_key, debug=getattr(args, 'debug', False)
+                )
+                df_raw = extraction_info["df_raw"]
+
+        elif rerun_visuals and not status["layer2_done"]:
+            # Cannot do visual-only rerun without existing audio events
+            print("  SKIP: --rerun-visuals requires existing raw_events.csv (no audio cache)")
+            return None
+
+        elif status["layer2_done"]:
             raw_csv = os.path.join(meeting["path"], "raw_events.csv")
             df_raw = pd.read_csv(raw_csv)
             print(f"  Layer 2: loaded {len(df_raw)} cached events")
@@ -905,6 +1039,8 @@ def parse_args() -> argparse.Namespace:
                         help="Local Whisper model size")
     parser.add_argument("--skip-video", action="store_true",
                         help="Skip Layer 2 if raw_events.csv exists")
+    parser.add_argument("--rerun-visuals", action="store_true",
+                        help="Re-run visual processing only (keep audio, re-detect gestures, re-fuse)")
 
     # LLM abstraction parameters
     parser.add_argument("--window-seconds", type=int, default=60)
